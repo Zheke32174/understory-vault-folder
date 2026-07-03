@@ -9,22 +9,28 @@
     <string name="action_cancel">Cancel</string>
     <string name="action_back">Back</string>
 
-    <!-- Recovery (§4) -->
+    <!-- Recovery (self-sealing file model) -->
     <string name="recovery_title">Recover your vault</string>
-    <string name="recovery_no_key">No recovery key was saved for this vault. The encrypted files can\'t be opened on this device anymore. Reset to start fresh.</string>
-    <string name="recovery_enter_key">Enter your recovery key to restore access to %1$d folder(s). You\'ll confirm with your device once per folder.</string>
-    <string name="recovery_rebind_action">Restore with recovery key</string>
     <string name="recovery_reset_action">Reset vault instead</string>
+    <string name="recovery_import_body">This device couldn\'t re-bind the vault automatically. If you saved a recovery file, restore it now — you won\'t type anything, the file carries what\'s needed.</string>
+    <string name="recovery_import_action">Restore from your recovery file</string>
+    <string name="recovery_import_working">Restoring from your recovery file…</string>
+    <string name="recovery_import_open_failed">Couldn\'t open the file picker: %1$s</string>
+    <string name="recovery_import_bad_file">That file couldn\'t restore this vault. It may be the wrong file or corrupt.</string>
 
-    <!-- Setup recovery escrow (§4.3) -->
-    <string name="setup_recovery_prompt">Save a recovery key now, or accept that losing this device — or re-enrolling your fingerprint — permanently destroys the vault.</string>
-    <string name="setup_recovery_save">Save a recovery key</string>
-    <string name="setup_recovery_skip">Skip — I accept lost device means lost vault</string>
-    <string name="setup_recovery_key_hint">Write this down and store it off this device. It is the only way to recover the vault after a fingerprint re-enrollment. We cannot recover it for you.</string>
-    <string name="setup_recovery_saved_confirm">I saved this key somewhere safe</string>
+    <!-- Setup recovery (self-sealing) -->
+    <string name="setup_recovery_prompt">This vault seals its own recovery kit on this device, and you can export a recovery file to keep somewhere safe. You never write down or type a recovery key.</string>
 
-    <!-- Backup honesty (§4.4) -->
-    <string name="backup_offdevice">To keep an off-device copy, use the recovery key above, or export a file and store the plain copy where you choose.</string>
+    <!-- Off-device recovery file -->
+    <string name="action_export_recovery_file">Export recovery file</string>
+    <string name="recovery_file_name">vault-folder-recovery.ukit</string>
+    <string name="recovery_file_warning">This file can restore your vault — keep it somewhere safe. Anyone who has it can open your vault.</string>
+    <string name="recovery_file_saved">Recovery file saved. Keep it somewhere safe — anyone who has it can open your vault.</string>
+    <string name="recovery_file_no_kit">No recovery kit to export yet.</string>
+    <string name="recovery_file_failed">Couldn\'t save the recovery file: %1$s</string>
+
+    <!-- Backup honesty -->
+    <string name="backup_offdevice">For an off-device copy, use Export recovery file from the vault list — one opaque file you keep somewhere safe. There is no key to write down.</string>
 
     <!-- Deposit confirm (§3) -->
     <string name="deposit_confirm_title">Add this file to the vault?</string>
@@ -65,8 +71,6 @@
     <string name="action_lock">Lock</string>
     <string name="action_export">Export</string>
     <string name="action_delete">Delete</string>
-    <string name="action_backup">Backup</string>
-    <string name="action_restore">Restore</string>
     <string name="action_diagnostics">Diagnostics</string>
     <string name="action_open">Open</string>
     <string name="action_unlock">Unlock</string>
@@ -92,7 +96,6 @@
     <string name="setup_size_cap">Per-file size cap: 20 MiB. Vault-folder is for documents, keys, recovery codes, photos — not video archives.</string>
     <string name="setup_generate">Self-generate vault</string>
     <string name="setup_authenticate">Authenticate with your device to bind the vault master key.</string>
-    <string name="setup_continue_no_key">Continue without a recovery key</string>
     <string name="setup_need_screenlock">Device screen lock required.\n\nVault-folder binds the master key to your device\'s PIN / pattern / biometric. Set up a screen lock in system Settings, then come back.</string>
     <string name="setup_need_biometric">BiometricPrompt unavailable (status %1$d). Configure a strong biometric or device credential in system Settings.</string>
     <string name="err_setup_failed">Setup failed: %1$s</string>
@@ -133,12 +136,6 @@
     <string name="shred_title">Shred source after import?</string>
     <string name="shred_body">After encrypting this file into the vault, attempt to permanently delete the source file from where you picked it. This cannot be undone if it succeeds. If the source URI doesn\'t grant write access, the delete will fail and the source will remain — your encrypted copy is safe either way.</string>
     <string name="shred_confirm">Encrypt + shred</string>
-
-    <!-- Recovery-backup export gate (Stage.Export) -->
-    <string name="export_gate_title">Export recovery backup</string>
-    <string name="export_gate_no_key">No recovery key was enrolled for this vault, so there is no recovery-encrypted backup to make. Use the per-file Export action in the list to save an individual file instead.</string>
-    <string name="export_gate_body">Enter your recovery key. The backup is encrypted so only this key can open it.</string>
-    <string name="export_gate_state_unavailable">Recovery state unavailable.</string>
 
     <!-- Folders (§6 / §9) -->
     <string name="folders_intro">Each folder has its own master key, biometric-released. Switching folders prompts for biometric again. The Default folder is the one created at first setup.</string>

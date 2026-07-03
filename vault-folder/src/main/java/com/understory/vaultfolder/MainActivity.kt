@@ -29,12 +29,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Checkbox
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -66,13 +63,10 @@ import com.understory.security.Diagnostics
 import com.understory.security.DiagnosticsDump
 import com.understory.security.DiagnosticsScreen
 import com.understory.security.KeepAliveBackHandler
-import com.understory.security.RecoveryCopy
 import com.understory.security.SecureOutlinedButton
 import com.understory.security.Tamper
 import com.understory.security.TestingMode
 import com.understory.security.TransientFlight
-import com.understory.security.VaultExportScreen
-import com.understory.security.VaultImportScreen
 import com.understory.security.VaultRecovery
 import com.understory.security.VaultRecoveryScreen
 import com.understory.security.ui.Bg
@@ -283,7 +277,7 @@ class MainActivity : FragmentActivity() {
     }
 }
 
-private enum class Stage { Setup, Unlock, List, Add, Folders, Diagnostics, Recovery, Reset, Export, ExportDo, Import, Viewer }
+private enum class Stage { Setup, Unlock, List, Add, Folders, Diagnostics, Recovery, Reset, Viewer }
 
 @Composable
 private fun VaultFolderRoot(
@@ -387,8 +381,6 @@ private fun VaultFolderRoot(
                 onFolders = { setStage(Stage.Folders) },
                 onLock = { v.lock(); setUnlocked(null); onClose() },
                 onDiagnostics = { setStage(Stage.Diagnostics) },
-                onExportBackup = { setStage(Stage.Export) },
-                onImportBackup = { setStage(Stage.Import) },
                 onView = { entry -> viewerEntryId = entry.id; setStage(Stage.Viewer) },
                 showMessage = showMessage,
             )
@@ -399,43 +391,6 @@ private fun VaultFolderRoot(
             if (entry == null) { backToList(); return }
             BackHandler { backToList() }
             ViewerScreen(store = v, entry = entry, onBack = backToList)
-        }
-        Stage.Export -> {
-            unlockedRef() ?: return run { setStage(Stage.Unlock) }
-            BackHandler { setStage(Stage.List) }
-            // A recovery export is encrypted under the user's recovery key. We
-            // do NOT retain that key in memory, so the user re-enters it here
-            // (they saved it at setup) — the key gate makes the export both
-            // real and honest. It's verified against the stored verifier so a
-            // typo can't produce an unrecoverable file.
-            ExportKeyGate(
-                onKey = { key ->
-                    // hand off to the shared export screen with the entered key
-                    exportKeyChars = key
-                    setStage(Stage.ExportDo)
-                },
-                onBack = { setStage(Stage.List) },
-            )
-        }
-        Stage.ExportDo -> {
-            val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
-            val key = exportKeyChars ?: return run { setStage(Stage.Export) }
-            BackHandler { setStage(Stage.List) }
-            VaultExportScreen(
-                port = remember { VaultFolderExportPort() },
-                unlocked = v,
-                recoveryKey = key,
-                onDone = {
-                    key.fill(' '); exportKeyChars = null
-                    setStage(Stage.List)
-                },
-            )
-        }
-        Stage.Import -> {
-            val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
-            BackHandler { setStage(Stage.List) }
-            val port = remember { VaultFolderExportPort().also { it.importTarget = v } }
-            VaultImportScreen(port = port, onDone = { setStage(Stage.List) })
         }
         Stage.Folders -> {
             val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
@@ -481,71 +436,6 @@ private fun VaultFolderRoot(
 // Process-scoped scratch for cross-stage hand-offs. Not persisted; recreated on
 // process death (which locks the vault anyway).
 private var viewerEntryId: String? = null
-private var exportKeyChars: CharArray? = null
-
-/**
- * Gate before a recovery export: the user re-enters their recovery key (they
- * saved it at setup). The key is verified against the stored verifier so a typo
- * can't produce an unrecoverable file. Shown only when a recovery key was
- * enrolled — otherwise there is no recovery-encrypted export to make, and the
- * screen says so honestly.
- */
-@Composable
-private fun ExportKeyGate(onKey: (CharArray) -> Unit, onBack: () -> Unit) {
-    val ctx = LocalContext.current
-    val enrolled = remember { RecoveryStateStore.exists(ctx) }
-    var field by remember { mutableStateOf("") }
-    var error by remember { mutableStateOf<String?>(null) }
-
-    Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text(stringResource(R.string.export_gate_title), style = MaterialTheme.typography.titleLarge)
-        if (!enrolled) {
-            Text(
-                stringResource(R.string.export_gate_no_key),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-                Text(stringResource(R.string.action_back))
-            }
-            return@Column
-        }
-        Text(
-            stringResource(R.string.export_gate_body),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-        OutlinedTextField(
-            value = field,
-            onValueChange = { field = it },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-        )
-        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
-        Button(
-            onClick = {
-                val state = RecoveryStateStore.load(ctx)
-                if (state == null) { error = ctx.getString(R.string.export_gate_state_unavailable); return@Button }
-                val entered = VaultRecovery.recoveryKeyFrom(field.toCharArray())
-                val ok = VaultRecovery.verifyRecoveryKey(entered, state.verifier, state.verifierSalt)
-                if (!ok) {
-                    entered.wipe()
-                    error = RecoveryCopy.IMPORT_WRONG_KEY
-                } else {
-                    onKey(entered.chars)
-                }
-            },
-            enabled = field.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text(stringResource(R.string.action_continue)) }
-        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
-            Text(stringResource(R.string.action_back))
-        }
-    }
-}
 
 private fun deviceUnsupportedReason(ctx: Context): String? {
     val km = ctx.getSystemService(android.app.KeyguardManager::class.java)
@@ -575,15 +465,12 @@ private fun SetupScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val deviceIssue = remember { deviceUnsupportedReason(ctx) }
 
-    // §4.3 recovery escrow. THREAT-MODEL INVARIANT (screen-emanation defense):
-    // the value that can decrypt a recovery backup is NEVER rendered on screen —
-    // no key reveal, no QR. The user SUPPLIES a recovery passphrase (masked),
-    // which derives the escrow key and encrypts the recovery copy, and is what
-    // they type on restore. Held in plain remember — process-bound.
-    var recoveryPass by remember { mutableStateOf("") }
-    var recoveryConfirm by remember { mutableStateOf("") }
-    var enrollRecovery by remember { mutableStateOf(true) }
-    val recoveryValid = recoveryPass.length >= 8 && recoveryPass == recoveryConfirm
+    // SELF-SEALING recovery (operator directive 2026-07-03 — "the screen is the
+    // enemy"). The user is NEVER prompted for, shown, or asked to type a recovery
+    // key/passphrase. At bind, VaultFolder.create self-seals the vault KEK into
+    // an at-rest recovery kit encrypted under the non-auth wrap key; the user can
+    // later export an opaque recovery file from the vault list. So Setup is just
+    // intro → authenticate.
 
     SuiteScaffold(
         title = stringResource(R.string.title_setup),
@@ -635,7 +522,8 @@ private fun SetupScreen(
                             modifier = Modifier.padding(UnderstoryTheme.spacing.md),
                         )
                     }
-                    // §4.4 backup honesty — no false "#7 backups" claim.
+                    // Backup honesty: the vault self-seals a recovery kit and can
+                    // export an opaque recovery file — no key to write down.
                     Text(
                         stringResource(R.string.backup_offdevice),
                         style = MaterialTheme.typography.bodySmall,
@@ -649,78 +537,6 @@ private fun SetupScreen(
                     }
                 }
                 1 -> {
-                    // §4.3: recovery-passphrase enrollment choice BEFORE binding.
-                    // The passphrase is chosen by the user and never displayed
-                    // (threat model: no secret on screen).
-                    Text(
-                        "Recovery passphrase",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                    )
-                    Text(
-                        "Set a passphrase that can restore this vault on a new " +
-                            "device or after a fingerprint change. It is never " +
-                            "shown on screen or stored — if you lose it, a recovery " +
-                            "backup can't be opened. Keep it in your password manager.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    // §3 a11y: shared SwitchRow → merged Role.Switch TalkBack
-                    // semantics instead of a bare Switch beside a label.
-                    SwitchRow(
-                        label = stringResource(R.string.setup_recovery_save),
-                        checked = enrollRecovery,
-                        onCheckedChange = { enrollRecovery = it },
-                    )
-                    if (enrollRecovery) {
-                        OutlinedTextField(
-                            value = recoveryPass,
-                            onValueChange = { recoveryPass = it },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            label = { Text("Recovery passphrase") },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        OutlinedTextField(
-                            value = recoveryConfirm,
-                            onValueChange = { recoveryConfirm = it },
-                            singleLine = true,
-                            visualTransformation = PasswordVisualTransformation(),
-                            label = { Text("Confirm passphrase") },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        if (recoveryPass.isNotEmpty() && recoveryPass.length < 8) {
-                            Text(
-                                "Use at least 8 characters.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = UnderstoryTheme.semantic.warning,
-                            )
-                        } else if (recoveryConfirm.isNotEmpty() && recoveryPass != recoveryConfirm) {
-                            Text(
-                                "The two entries don't match.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = UnderstoryTheme.semantic.warning,
-                            )
-                        }
-                    }
-                    error?.let {
-                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
-                    }
-                    Button(
-                        onClick = { step = 2 },
-                        enabled = !enrollRecovery || recoveryValid,
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Text(
-                            if (enrollRecovery) stringResource(R.string.action_continue)
-                            else stringResource(R.string.setup_continue_no_key)
-                        )
-                    }
-                    OutlinedButton(onClick = { step = 0 }, modifier = Modifier.fillMaxWidth()) {
-                        Text(stringResource(R.string.action_back))
-                    }
-                }
-                2 -> {
                     Text(
                         stringResource(R.string.setup_authenticate),
                         style = MaterialTheme.typography.bodySmall,
@@ -741,26 +557,11 @@ private fun SetupScreen(
                                     scope.launch {
                                         val outcome = runCatching {
                                             withContext(Bg.io) {
-                                                // Derive the escrow key from the
-                                                // user's passphrase (never a shown
-                                                // random key). recoveryKeyFrom
-                                                // normalizes exactly as the restore
-                                                // path does, so enroll and restore
-                                                // stay consistent.
-                                                val rk = if (enrollRecovery)
-                                                    VaultRecovery.recoveryKeyFrom(recoveryPass.toCharArray())
-                                                else null
-                                                val v = VaultFolder.create(ctx, authed, recoveryKeyChars = rk?.chars)
-                                                if (rk != null) {
-                                                    // Persist the recovery verifier so a later
-                                                    // recovery / import can check the passphrase.
-                                                    RecoveryStateStore.save(
-                                                        ctx,
-                                                        VaultRecovery.enroll(rk, itemCount = 0),
-                                                    )
-                                                    rk.wipe()
-                                                }
-                                                v
+                                                // create() self-seals the vault KEK
+                                                // into the at-rest recovery kit
+                                                // (random R minted internally — never
+                                                // shown, never typed).
+                                                VaultFolder.create(ctx, authed)
                                             }
                                         }
                                         outcome.fold(
@@ -774,7 +575,7 @@ private fun SetupScreen(
                                     }
                                 },
                                 onError = { msg -> error = ctx.getString(R.string.err_auth_failed, msg) },
-                                onCancel = { error = ctx.getString(R.string.err_auth_cancelled); step = 1 },
+                                onCancel = { error = ctx.getString(R.string.err_auth_cancelled); step = 0 },
                             )
                         }.onFailure { error = ctx.getString(R.string.err_crypto_init, it.message) }
                     }
@@ -881,8 +682,6 @@ private fun ListScreen(
     onFolders: () -> Unit,
     onLock: () -> Unit,
     onDiagnostics: () -> Unit,
-    onExportBackup: () -> Unit,
-    onImportBackup: () -> Unit,
     onView: (VaultFolderEntry) -> Unit,
     showMessage: (String) -> Unit,
 ) {
@@ -891,6 +690,38 @@ private fun ListScreen(
     var revision by remember { mutableIntStateOf(0) }
     var deleteCandidate by remember { mutableStateOf<VaultFolderEntry?>(null) }
     var exportState by remember { mutableStateOf<OpState>(OpState.Idle) }
+
+    // "Export recovery file": SAF CreateDocument writes the opaque, self-contained
+    // recovery file (carries R + the R-encrypted vault KEK) so the vault can be
+    // restored on a brand-new device. Never displays contents. The honest copy on
+    // the button/snackbar says anyone who has the file can open the vault.
+    val recoveryExportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/octet-stream"),
+    ) { uri: Uri? ->
+        VaultFolderManager.endTransientFlight()
+        if (uri == null) return@rememberLauncherForActivityResult
+        exportState = OpState.Working
+        scope.launch {
+            val outcome = withContext(Bg.io) {
+                runCatching {
+                    ctx.contentResolver.openOutputStream(uri)?.use { out ->
+                        VaultFolder.exportRecoveryFile(ctx, out)
+                    } ?: error("Could not open the chosen file for writing.")
+                }
+            }
+            exportState = outcome.fold(
+                onSuccess = { wrote ->
+                    if (wrote == true) OpState.Done(ctx.getString(R.string.recovery_file_saved))
+                    else OpState.Failed(ctx.getString(R.string.recovery_file_no_kit))
+                },
+                onFailure = {
+                    Diagnostics.error("vault-folder.List",
+                        "recovery export failed: ${it.javaClass.simpleName}: ${it.message}")
+                    OpState.Failed(ctx.getString(R.string.recovery_file_failed, it.message))
+                },
+            )
+        }
+    }
 
     // §1.2 crash fix: hold the entry ID STRING (natively saveable), never the
     // non-Parcelable VaultFolderEntry, across the SAF round-trip. On return we
@@ -1011,17 +842,30 @@ private fun ListScreen(
                     }
                 }
             }
-            Row(
+            // Off-device disaster recovery: export ONE opaque recovery file the
+            // user keeps somewhere safe. No key is shown or typed. Honest copy:
+            // anyone who has this file can open the vault.
+            OutlinedButton(
+                onClick = {
+                    if (exportState is OpState.Working) return@OutlinedButton
+                    VaultFolderManager.beginTransientFlight()
+                    runCatching {
+                        recoveryExportLauncher.launch(recoveryFileName(ctx))
+                    }.onFailure {
+                        VaultFolderManager.endTransientFlight()
+                        showMessage(ctx.getString(R.string.recovery_file_failed, it.message))
+                    }
+                },
+                enabled = exportState !is OpState.Working,
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
             ) {
-                OutlinedButton(onClick = onExportBackup, modifier = Modifier.weight(1f)) {
-                    Text(stringResource(R.string.action_backup))
-                }
-                OutlinedButton(onClick = onImportBackup, modifier = Modifier.weight(1f)) {
-                    Text(stringResource(R.string.action_restore))
-                }
+                Text(stringResource(R.string.action_export_recovery_file))
             }
+            Text(
+                stringResource(R.string.recovery_file_warning),
+                style = MaterialTheme.typography.bodySmall,
+                color = UnderstoryTheme.semantic.warning,
+            )
             OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
                 Text(stringResource(R.string.action_diagnostics))
             }
@@ -1381,3 +1225,7 @@ private fun humanSize(bytes: Long): String = when {
     bytes < 1024 * 1024 -> "${bytes / 1024} KB"
     else -> "${bytes / (1024 * 1024)} MB"
 }
+
+/** Suggested SAF filename for the exported recovery file: `<app>-recovery.ukit`. */
+private fun recoveryFileName(ctx: Context): String =
+    ctx.getString(R.string.recovery_file_name)
