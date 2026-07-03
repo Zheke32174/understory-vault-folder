@@ -150,17 +150,19 @@
         android:supportsRtl="true">
 
         <!--
-          Activity-isolation set relaxed for the testing phase — except
-          excludeFromRecents, re-added per RELEASE_BLOCKERS.md (this is
-          the vault UI). See RELEASE_BLOCKERS.md.
+          Vault UI activity. excludeFromRecents keeps vault contents out
+          of the recents thumbnail; FLAG_SECURE + setRecentsScreenshotEnabled
+          (MainActivity.initialize) back it at runtime. resizeableActivity is
+          true and there is no portrait lock — the screens are simple reflowing
+          Column/LazyColumn layouts and the in-app viewer benefits from
+          landscape; configChanges below absorbs the rotation with no state loss.
         -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:excludeFromRecents="true"
-            android:resizeableActivity="false"
-            android:screenOrientation="portrait"
+            android:resizeableActivity="true"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
             android:theme="@style/Theme.VaultFolder">
             <intent-filter>
@@ -187,7 +189,6 @@
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
-                <category android:name="android.intent.category.BROWSABLE" />
                 <data android:mimeType="application/octet-stream" />
                 <data android:mimeType="application/json" />
                 <data android:mimeType="text/plain" />
@@ -197,9 +198,22 @@
             </intent-filter>
         </activity>
 
+        <!--
+          In-app viewer's isolated renderer (§5.2). isolatedProcess=true runs it
+          in a sandbox with no permissions, no Keystore, no filesystem, no
+          network; exported=false keeps it private to this app. It only ever
+          receives already-decrypted bytes over an in-memory pipe and returns a
+          rendered bitmap, so a malformed-image/PDF parser bug can't reach the
+          KEK or the blobs.
+        -->
+        <service
+            android:name=".ViewerRenderService"
+            android:isolatedProcess="true"
+            android:exported="false" />
+
         <provider
             android:name=".SuiteCapsProvider"
-            android:authorities="com.understory.vaultfolder.suitecaps"
+            android:authorities="${applicationId}.suitecaps"
             android:exported="true"
             android:readPermission="com.understory.suite.CAPS"
             android:writePermission="com.understory.suite.CAPS_WRITE"

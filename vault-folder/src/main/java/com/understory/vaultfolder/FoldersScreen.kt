@@ -15,26 +15,37 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import com.understory.security.Crypto
 import com.understory.security.Diagnostics
+import com.understory.security.SecureOutlinedButton
+import com.understory.security.ui.Bg
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Multi-folder hub. Lists every folder (default + secondaries),
@@ -59,12 +70,21 @@ fun FoldersScreen(
     onBack: () -> Unit,
 ) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var refreshKey by remember { mutableStateOf(0) }
     val folders = remember(refreshKey) { VaultFolders.list(ctx) }
     var error by remember { mutableStateOf<String?>(null) }
+    var notice by remember { mutableStateOf<String?>(null) }
     var working by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<VaultFolders.FolderInfo?>(null) }
+    var pendingRename by remember { mutableStateOf<VaultFolders.FolderInfo?>(null) }
+
+    // §6.3 (A11.4 / D12): clean orphan index rows left by a cancelled/failed
+    // create, off the main thread, instead of relying on read-time filtering.
+    LaunchedEffect(Unit) {
+        withContext(Bg.io) { runCatching { VaultFolders.pruneOrphans(ctx) } }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(20.dp),
@@ -78,10 +98,15 @@ fun FoldersScreen(
             color = Color(0xFF9E9E9E), fontSize = 12.sp,
         )
         error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
+        // §6.4: folder-delete / rename success is a NEUTRAL line, not the red
+        // error slot.
+        notice?.let { Text(it, color = Color(0xFF81C784), fontSize = 12.sp) }
 
         LazyColumn(
             verticalArrangement = Arrangement.spacedBy(6.dp),
-            modifier = Modifier.fillMaxWidth(),
+            // §6.2 (A11.3 / D9): weight(1f) so a long folder list can't push
+            // Create/Back off-screen; those stay as fixed rows below.
+            modifier = Modifier.fillMaxWidth().weight(1f),
         ) {
             items(folders, key = { it.id }) { folder ->
                 FolderRow(
@@ -99,10 +124,12 @@ fun FoldersScreen(
                         Diagnostics.log("vault-folder.Folders", "open: ${folder.id}")
                         working = true
                         error = null
+                        notice = null
                         runCatching {
                             val iv = VaultFolder.ivForUnlock(ctx, folder.id)
                             val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
-                            promptAuthLocal(activity, "Unlock ${folder.name}", cipher,
+                            promptDeviceAuth(activity, "Unlock ${folder.name}",
+                                "Required to release this folder's master key.", cipher,
                                 onSuccess = { authed ->
                                     runCatching {
                                         val store = VaultFolder.unlock(ctx, authed, folder.id)
@@ -132,6 +159,11 @@ fun FoldersScreen(
                     },
                     onDelete = if (folder.isDefault) null else {
                         { pendingDelete = folder }
+                    },
+                    // §6.5 (A13 / D12): rename is only offered on non-default
+                    // folders (the default's display name is hardcoded).
+                    onRename = if (folder.isDefault) null else {
+                        { pendingRename = folder }
                     },
                 )
             }
@@ -170,21 +202,79 @@ fun FoldersScreen(
             onDismissRequest = { pendingDelete = null },
             title = { Text("Delete folder?") },
             text = {
+                // §6.4 (A12 / D5): folder-delete is the most destructive action
+                // in the app — bring its guard to parity with file delete:
+                // filterTouchesWhenObscured on the dialog view + a hasWindowFocus
+                // gate on confirm (see below), and blast-radius copy.
+                val dialogView = LocalView.current
+                DisposableEffect(dialogView) {
+                    dialogView.filterTouchesWhenObscured = true
+                    onDispose { }
+                }
                 Text(
-                    "Delete \"${folder.name}\"? This permanently shreds " +
-                        "every file in it. This cannot be undone.",
+                    "Deletes the folder \"${folder.name}\" and ALL files in it. " +
+                        "No recycle bin, no recovery.",
                 )
             },
             confirmButton = {
+                val dialogView = LocalView.current
                 TextButton(onClick = {
-                    val ok = VaultFolders.delete(ctx, folder.id)
-                    error = if (ok) "Deleted ${folder.name}." else "Delete failed."
+                    if (!dialogView.hasWindowFocus()) return@TextButton
+                    val target = folder
                     pendingDelete = null
-                    refreshKey++
+                    error = null
+                    scope.launch {
+                        val ok = withContext(Bg.io) {
+                            runCatching { VaultFolders.delete(ctx, target.id) }.getOrDefault(false)
+                        }
+                        if (ok) notice = "Deleted ${target.name}." else error = "Delete failed."
+                        refreshKey++
+                    }
                 }) { Text("Delete", color = Color(0xFFEF5350)) }
             },
             dismissButton = {
                 TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
+            },
+        )
+    }
+
+    // §6.5: rename dialog. Reuses the same sanitize/disabled-empty handling as
+    // the create dialog's name entry. rename() itself refuses the default
+    // folder and sanitizes the name.
+    pendingRename?.let { folder ->
+        var newName by remember(folder.id) { mutableStateOf(folder.name) }
+        AlertDialog(
+            onDismissRequest = { pendingRename = null },
+            title = { Text("Rename folder") },
+            text = {
+                OutlinedTextField(
+                    value = newName,
+                    onValueChange = { newName = it },
+                    label = { Text("Folder name") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        val target = folder
+                        val name = newName
+                        pendingRename = null
+                        error = null
+                        scope.launch {
+                            val ok = withContext(Bg.io) {
+                                runCatching { VaultFolders.rename(ctx, target.id, name) }.isSuccess
+                            }
+                            if (ok) notice = "Renamed to ${name.trim()}." else error = "Rename failed."
+                            refreshKey++
+                        }
+                    },
+                    enabled = newName.isNotBlank(),
+                ) { Text("Rename") }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingRename = null }) { Text("Cancel") }
             },
         )
     }
@@ -197,6 +287,7 @@ private fun FolderRow(
     working: Boolean,
     onOpen: () -> Unit,
     onDelete: (() -> Unit)?,
+    onRename: (() -> Unit)?,
 ) {
     Box(
         modifier = Modifier
@@ -212,10 +303,15 @@ private fun FolderRow(
                 Text(
                     folder.name,
                     color = Color(0xFFE0E0E0), fontSize = 14.sp,
-                    modifier = Modifier.fillMaxWidth(0.7f),
+                    modifier = Modifier.weight(1f),
                 )
                 if (isCurrent) {
                     Text("· unlocked", color = Color(0xFF66BB6A), fontSize = 11.sp)
+                }
+                if (onRename != null) {
+                    IconButton(onClick = onRename, enabled = !working) {
+                        Icon(Icons.Filled.Edit, contentDescription = "Rename ${folder.name}")
+                    }
                 }
             }
             Text(
@@ -234,7 +330,9 @@ private fun FolderRow(
                     modifier = if (onDelete != null) Modifier.fillMaxWidth(0.6f) else Modifier.fillMaxWidth(),
                 ) { Text(if (isCurrent) "Open" else "Unlock") }
                 if (onDelete != null) {
-                    OutlinedButton(
+                    // §6.4: row Delete is tap-jack-hardened (SecureOutlinedButton),
+                    // matching the file-delete action's guard.
+                    SecureOutlinedButton(
                         onClick = onDelete,
                         enabled = !working,
                         modifier = Modifier.fillMaxWidth(),
@@ -303,7 +401,8 @@ private fun CreateFolderDialog(
             runCatching {
                 val info = VaultFolders.reserveNew(ctx, name)
                 val cipher = Crypto.deviceAuthCipherForEncrypt()
-                promptAuthLocal(activity, "Create ${info.name}", cipher,
+                promptDeviceAuth(activity, "Create ${info.name}",
+                    "Required to seed this folder's master key.", cipher,
                     onSuccess = { authed ->
                         runCatching {
                             val store = VaultFolder.create(ctx, authed, info.id)
@@ -336,44 +435,4 @@ private fun CreateFolderDialog(
             }
         }
     }
-}
-
-// Local promptAuth shim. The MainActivity-private one is identical;
-// re-declared here to avoid leaking the function across files.
-private fun promptAuthLocal(
-    activity: FragmentActivity,
-    title: String,
-    cipher: javax.crypto.Cipher,
-    onSuccess: (javax.crypto.Cipher) -> Unit,
-    onError: (String) -> Unit,
-    onCancel: () -> Unit,
-) {
-    val prompt = androidx.biometric.BiometricPrompt(
-        activity,
-        java.util.concurrent.Executors.newSingleThreadExecutor(),
-        object : androidx.biometric.BiometricPrompt.AuthenticationCallback() {
-            override fun onAuthenticationSucceeded(
-                result: androidx.biometric.BiometricPrompt.AuthenticationResult,
-            ) {
-                val c = result.cryptoObject?.cipher
-                if (c != null) onSuccess(c)
-                else onError("Cipher missing in BiometricPrompt result.")
-            }
-            override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-                if (errorCode == androidx.biometric.BiometricPrompt.ERROR_USER_CANCELED ||
-                    errorCode == androidx.biometric.BiometricPrompt.ERROR_NEGATIVE_BUTTON
-                ) onCancel()
-                else onError(errString.toString())
-            }
-        },
-    )
-    val info = androidx.biometric.BiometricPrompt.PromptInfo.Builder()
-        .setTitle(title)
-        .setSubtitle("Required to seed or release this folder's master key.")
-        .setAllowedAuthenticators(
-            androidx.biometric.BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                androidx.biometric.BiometricManager.Authenticators.DEVICE_CREDENTIAL,
-        )
-        .build()
-    prompt.authenticate(info, androidx.biometric.BiometricPrompt.CryptoObject(cipher))
 }

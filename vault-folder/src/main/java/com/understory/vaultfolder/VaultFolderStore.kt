@@ -21,13 +21,25 @@ import java.util.UUID
  *
  * On-disk layout under `ctx.filesDir/vault-folder/`:
  *
- *   metadata.bin     — header_v1 || iv12 || ct(JSON contents) || tag16
- *   f-{uuid}.bin     — header_v1 || iv12 || ct(file bytes) || tag16
+ *   metadata.bin     — [v2] || iv12 || ct(JSON contents) || tag16
+ *   f-{uuid}.bin     — [v2] || iv12 || ct(file bytes) || tag16
  *   f-{uuid}.bin
  *   ...
  *
  * Each blob is independently AES-GCM-encrypted with a fresh per-blob
  * IV; the master KEK is shared across all blobs in this vault.
+ *
+ * Envelope format v2 (§7 D13): a 1-byte version prefix ([FORMAT_V2]) is
+ * followed by the `Crypto.aesGcmEncrypt` output, and each envelope is
+ * bound to its identity via AAD so a data-dir attacker cannot swap two
+ * blob files undetected (name says A, bytes are B). AAD is
+ * `folderId || 0x00 || blobId` for a blob and `folderId || 0x00 ||
+ * "metadata"` for the directory. Reads are version-gated: a v1 envelope
+ * (no prefix, no AAD — a pre-v2 field install) still decrypts via the
+ * legacy path; every write emits v2. There is no in-place migration —
+ * a v1 blob is upgraded to v2 the next time it is rewritten (it never
+ * is, in practice, since blobs are immutable), which is acceptable
+ * because the legacy reader stays.
  *
  * Why per-file blobs (not one big container):
  *   - Adding a file doesn't rewrite the whole vault.
@@ -38,6 +50,12 @@ import java.util.UUID
  * for documents, keys, recovery codes, photos. Bigger media isn't its
  * use case. The cap also prevents accidentally encrypting a video the
  * user thought was tiny.
+ *
+ * Threading contract (§2.3): every public method blocks — they perform
+ * synchronous crypto + file IO. Callers MUST invoke them off the main
+ * thread (`withContext(Bg.io)`); the composables own the coroutine so
+ * that the isolated viewer service and any future caller can each pick
+ * their own dispatcher.
  */
 class VaultFolderStore internal constructor(
     ctx: Context,
@@ -141,13 +159,38 @@ class VaultFolderStore internal constructor(
     }
 
     /**
+     * Add a file from already-decrypted in-memory [plaintext] (recovery
+     * import, §4). Encrypts a fresh blob + updates metadata. Caller owns
+     * [plaintext] and must wipe it. Blocks; off the main thread.
+     */
+    fun addRestoredFile(displayName: String, mimeType: String, plaintext: ByteArray): VaultFolderEntry {
+        require(plaintext.size <= MAX_FILE_BYTES) {
+            "restored file too large (>${MAX_FILE_BYTES / (1024 * 1024)} MiB)"
+        }
+        val blobId = UUID.randomUUID().toString()
+        writeBlob(blobId, plaintext)
+        val entry = VaultFolderEntry(
+            id = blobId,
+            name = displayName,
+            mimeType = mimeType,
+            sizeBytes = plaintext.size.toLong(),
+            createdAtMs = System.currentTimeMillis(),
+        )
+        contentsState = contentsState.copy(entries = contentsState.entries + entry)
+        saveMetadata()
+        return entry
+    }
+
+    /**
      * Export a file to [outputUri]. Decrypts the blob and writes the
-     * plaintext to the SAF-granted output URI.
+     * plaintext to the SAF-granted output URI. Opens in `"wt"` mode
+     * (write+truncate) so re-exporting over a shorter existing document
+     * can't leave trailing bytes from the old content (§1.3 / D11).
      */
     fun exportFile(entry: VaultFolderEntry, outputUri: Uri) {
         val plaintext = readBlob(entry.id)
         try {
-            ctx.contentResolver.openOutputStream(outputUri, "w").use { out ->
+            ctx.contentResolver.openOutputStream(outputUri, "wt").use { out ->
                 requireNotNull(out) { "couldn't open output stream" }
                 out.write(plaintext)
             }
@@ -155,6 +198,14 @@ class VaultFolderStore internal constructor(
             Crypto.wipe(plaintext)
         }
     }
+
+    /**
+     * Decrypt [entry]'s blob to an in-memory plaintext [ByteArray] for the
+     * in-app viewer (§5). Caller OWNS the returned bytes and MUST wipe them
+     * (`Crypto.wipe`) as soon as they are handed to the isolated renderer.
+     * Blocks — must be called off the main thread.
+     */
+    fun readBlobBytes(entry: VaultFolderEntry): ByteArray = readBlob(entry.id)
 
     /** Permanently delete the blob + metadata entry. */
     fun deleteFile(entry: VaultFolderEntry) {
@@ -177,21 +228,21 @@ class VaultFolderStore internal constructor(
 
     private fun saveMetadata() {
         val json = serializeContents(contentsState).toByteArray(Charsets.UTF_8)
-        val ct = Crypto.aesGcmEncrypt(kek, json)
+        val env = sealV2(kek, json, metadataAad(folderId))
         Crypto.wipe(json)
-        atomicWrite(File(VaultFolder.vaultDir(ctx, folderId), METADATA_FILE), ct)
+        atomicWrite(File(VaultFolder.vaultDir(ctx, folderId), METADATA_FILE), env)
     }
 
     private fun writeBlob(blobId: String, plaintext: ByteArray) {
-        val ct = Crypto.aesGcmEncrypt(kek, plaintext)
-        atomicWrite(File(blobsDir(), "f-$blobId.bin"), ct)
+        val env = sealV2(kek, plaintext, blobAad(folderId, blobId))
+        atomicWrite(File(blobsDir(), "f-$blobId.bin"), env)
     }
 
     private fun readBlob(blobId: String): ByteArray {
         val file = File(blobsDir(), "f-$blobId.bin")
         require(file.exists()) { "blob ${blobId} missing on disk" }
-        val ct = file.readBytes()
-        return Crypto.aesGcmDecrypt(kek, ct)
+        val env = file.readBytes()
+        return openBlob(kek, env, blobAad(folderId, blobId))
     }
 
     private fun blobsDir(): File = VaultFolder.vaultDir(ctx, folderId)
@@ -218,6 +269,57 @@ class VaultFolderStore internal constructor(
     companion object {
         private const val MAX_FILE_BYTES: Long = 20L * 1024 * 1024
         const val METADATA_FILE = "metadata.bin"
+
+        /**
+         * Envelope format v2 version byte (§7 D13). A file whose first byte
+         * is this was written with AAD binding; anything else is a legacy v1
+         * envelope (bare `iv||ct`, no AAD) and read via the legacy path.
+         */
+        private const val FORMAT_V2: Byte = 2
+        private const val AAD_SEP: Byte = 0x00
+        private const val METADATA_AAD_TAG = "metadata"
+
+        /** AAD binding a blob to its identity: `folderId || 0x00 || blobId`. */
+        internal fun blobAad(folderId: String, blobId: String): ByteArray =
+            aadOf(folderId, blobId)
+
+        /** AAD binding the metadata directory: `folderId || 0x00 || "metadata"`. */
+        internal fun metadataAad(folderId: String): ByteArray =
+            aadOf(folderId, METADATA_AAD_TAG)
+
+        private fun aadOf(folderId: String, tag: String): ByteArray {
+            val f = folderId.toByteArray(Charsets.UTF_8)
+            val t = tag.toByteArray(Charsets.UTF_8)
+            val out = ByteArray(f.size + 1 + t.size)
+            System.arraycopy(f, 0, out, 0, f.size)
+            out[f.size] = AAD_SEP
+            System.arraycopy(t, 0, out, f.size + 1, t.size)
+            return out
+        }
+
+        /** Encrypt [pt] under [key] with [aad] and prepend the v2 version byte. */
+        internal fun sealV2(key: ByteArray, pt: ByteArray, aad: ByteArray): ByteArray {
+            val ct = Crypto.aesGcmEncrypt(key, pt, aad)
+            val out = ByteArray(1 + ct.size)
+            out[0] = FORMAT_V2
+            System.arraycopy(ct, 0, out, 1, ct.size)
+            return out
+        }
+
+        /**
+         * Decrypt an envelope, version-gated. A v2 envelope (leading
+         * [FORMAT_V2]) is decrypted with [aad]; a legacy v1 envelope (bare
+         * `iv||ct`) is decrypted with no AAD so a pre-v2 field install still
+         * opens. GCM authenticity still holds on the legacy path — v1 simply
+         * lacked the identity binding.
+         */
+        internal fun openBlob(key: ByteArray, env: ByteArray, aad: ByteArray): ByteArray {
+            return if (env.isNotEmpty() && env[0] == FORMAT_V2) {
+                Crypto.aesGcmDecrypt(key, env.copyOfRange(1, env.size), aad)
+            } else {
+                Crypto.aesGcmDecrypt(key, env)
+            }
+        }
 
         internal fun atomicWrite(target: File, bytes: ByteArray) {
             target.parentFile?.mkdirs()

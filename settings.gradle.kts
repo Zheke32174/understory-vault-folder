@@ -22,4 +22,5 @@ dependencyResolutionManagement {
 
 rootProject.name = "vault-folder"
 include(":common-security")
+include(":common-backup")
 include(":vault-folder")

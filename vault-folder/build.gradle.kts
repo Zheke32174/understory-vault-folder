@@ -78,6 +78,10 @@ android {
 
 dependencies {
     implementation(project(":common-security"))
+    // Recovery-envelope hand-off (VaultRecoveryEnvelope) + BackupAdapter for
+    // the shared vault-recovery contract (§4). Transitively re-exposes
+    // common-security, so the single explicit dep above is retained for clarity.
+    implementation(project(":common-backup"))
 
     val composeBom = platform("androidx.compose:compose-bom:2024.12.01")
     implementation(composeBom)

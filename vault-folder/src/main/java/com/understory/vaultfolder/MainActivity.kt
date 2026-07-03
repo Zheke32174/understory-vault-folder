@@ -1,12 +1,12 @@
 package com.understory.vaultfolder
 
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Debug
 import android.provider.OpenableColumns
-import android.view.View
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
@@ -14,7 +14,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -32,12 +31,16 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -45,15 +48,17 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
@@ -62,12 +67,21 @@ import com.understory.security.Diagnostics
 import com.understory.security.DiagnosticsDump
 import com.understory.security.DiagnosticsScreen
 import com.understory.security.KeepAliveBackHandler
-import com.understory.security.TransientFlight
+import com.understory.security.RecoveryCopy
 import com.understory.security.SecureOutlinedButton
 import com.understory.security.SuiteStatusFooter
 import com.understory.security.Tamper
 import com.understory.security.TestingMode
-import javax.crypto.Cipher
+import com.understory.security.TransientFlight
+import com.understory.security.VaultExportScreen
+import com.understory.security.VaultImportScreen
+import com.understory.security.VaultRecovery
+import com.understory.security.VaultRecoveryScreen
+import com.understory.security.ui.Bg
+import com.understory.security.ui.theme.UnderstoryAccent
+import com.understory.security.ui.theme.UnderstoryTheme
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class MainActivity : FragmentActivity() {
 
@@ -109,7 +123,31 @@ class MainActivity : FragmentActivity() {
             Tamper.check(applicationContext).hardFail ||
             com.understory.security.SuiteAttestation.verify(applicationContext).hardFail
         ) {
-            finishAndRemoveTask(); return
+            // §9.5 / CD-4c: show a brief honest screen instead of a bare exit so
+            // a user hitting an integrity failure understands why the app closed.
+            setContent {
+                UnderstoryTheme(accent = UnderstoryAccent.VAULTFOLDER) {
+                    Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+                        Column(
+                            modifier = Modifier.fillMaxSize().padding(24.dp),
+                            verticalArrangement = Arrangement.Center,
+                        ) {
+                            Text(
+                                stringResource(R.string.integrity_failed_title),
+                                style = MaterialTheme.typography.titleLarge,
+                                color = MaterialTheme.colorScheme.error,
+                            )
+                            Spacer(Modifier.height(8.dp))
+                            Text(
+                                stringResource(R.string.integrity_failed_body),
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
+            }
+            return
         }
 
         if (!TestingMode.ALLOW_SCREENSHOTS) {
@@ -131,16 +169,16 @@ class MainActivity : FragmentActivity() {
         runCatching { WindowCompat.setDecorFitsSystemWindows(window, false) }
 
         // ACTION_VIEW with a content URI: the user (or a peer suite app
-        // explicitly invoking us) is depositing a file into the vault.
-        // We pull the URI here so it survives onCreate's reach and gets
-        // handed to the Add screen post-unlock — same pattern as
-        // passgen/aegis import landings.
-        val depositUri: android.net.Uri? =
-            if (intent?.action == android.content.Intent.ACTION_VIEW) intent?.data else null
+        // explicitly invoking us) is depositing a file into the vault. We pull
+        // the URI here so it survives onCreate's reach and gets handed to the
+        // deposit-confirm dialog post-unlock. A warm-task deposit is handled by
+        // onNewIntent below.
+        val depositUri: Uri? =
+            if (intent?.action == Intent.ACTION_VIEW) intent?.data else null
 
         setContent {
-            MaterialTheme(colorScheme = darkColorScheme()) {
-                Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF0A0A0A)) {
+            UnderstoryTheme(accent = UnderstoryAccent.VAULTFOLDER) {
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     VaultFolderRoot(
                         activity = this,
                         unlockedRef = ::unlocked,
@@ -151,20 +189,22 @@ class MainActivity : FragmentActivity() {
                 }
             }
         }
+    }
 
-        // Note: we deliberately do NOT set
-        // `window.decorView.filterTouchesWhenObscured = true` here. Samsung
-        // One UI's Edge Panel and various system gesture overlays trigger
-        // FLAG_WINDOW_IS_OBSCURED on touches that pass through them, and
-        // a global decor-view filter silently drops every tap underneath
-        // — including the "Pick a file" SAF launcher tap, which is what
-        // surfaced this bug. Tap-jacking defense for *destructive* paths
-        // (Lock, Delete, encrypt/decrypt action) is enforced per-control
-        // via SecureButton / SecureOutlinedButton; the SAF picker is its
-        // own activity with its own anti-overlay protections, so opening
-        // it doesn't need this layer.
-        // FLAG_SECURE on the window still prevents screenshots / overlay
-        // capture of vault contents.
+    /**
+     * §3.4 (A7): a deposit arriving while this singleTask instance is already
+     * alive only reaches onNewIntent, not onCreate. Re-extract the URI into the
+     * observable holder the root composable reads, so a warm-task deposit is
+     * routed to the confirm dialog (after unlock, if currently locked) rather
+     * than silently dropped.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == Intent.ACTION_VIEW) {
+            VaultFolderManager.pendingDepositUri = intent.data
+            Diagnostics.log("vault-folder.MainActivity", "onNewIntent deposit uri present=${intent.data != null}")
+        }
     }
 
     override fun onUserLeaveHint() {
@@ -172,12 +212,7 @@ class MainActivity : FragmentActivity() {
         val inFlight = VaultFolderManager.isInTransientFlight
         Diagnostics.log("vault-folder.MainActivity",
             "onUserLeaveHint (inFlight=$inFlight, keepAlive=${TestingMode.KEEP_ALIVE_ON_LEAVE})")
-        // Skip during a deliberate transient round-trip (SAF picker,
-        // biometric prompt). Same reasoning as aegis/backups.
         if (inFlight) return
-        // Skip during the testing phase so the app stays alive across
-        // switching apps. RELEASE-BLOCKER to flip
-        // TestingMode.KEEP_ALIVE_ON_LEAVE = false before publish.
         if (TestingMode.KEEP_ALIVE_ON_LEAVE) return
         unlocked?.lock()
         unlocked = null
@@ -185,12 +220,12 @@ class MainActivity : FragmentActivity() {
     }
 
     /**
-     * Lock on onStop, NOT onPause — same lesson the aegis lifecycle
-     * audit taught us: onPause fires during transient occlusions
-     * (system permission dialogs, biometric prompts on some OEMs, the
-     * SAF picker we use for file import/export). Locking on onPause
-     * would wipe the KEK during such a round-trip and the active
-     * Compose state would call vault.save() against zero bytes.
+     * Lock on onStop, NOT onPause — same lesson the aegis lifecycle audit
+     * taught us: onPause fires during transient occlusions (system permission
+     * dialogs, biometric prompts on some OEMs, the SAF picker we use for file
+     * import/export). Locking on onPause would wipe the KEK during such a
+     * round-trip and the active Compose state would call vault.save() against
+     * zero bytes.
      */
     override fun onStop() {
         super.onStop()
@@ -200,10 +235,6 @@ class MainActivity : FragmentActivity() {
         Diagnostics.log("vault-folder.MainActivity",
             "onStop (inFlight=$inFlight, changingConfigs=$isCfg, keepAlive=$keepAlive, willLock=${!isCfg && !inFlight && !keepAlive})")
         DiagnosticsDump.snapshotState(this, "onStop")
-        // Preserve the unlocked store across:
-        //   - deliberate transient round-trips (SAF picker, biometric prompt)
-        //   - the testing phase (TestingMode.KEEP_ALIVE_ON_LEAVE — RELEASE-
-        //     BLOCKER to flip false before publish)
         if (!isCfg && !inFlight && !keepAlive) {
             unlocked?.lock()
             unlocked = null
@@ -223,11 +254,6 @@ class MainActivity : FragmentActivity() {
         val commonFlight = TransientFlight.isActive()
         Diagnostics.log("vault-folder.MainActivity",
             "onResume (vaultFlight=$vaultFlight commonFlight=$commonFlight)")
-        // Skip the hardFail re-check during a SAF picker round-trip.
-        // Same defense as antivirus + backups — the onCreate check is the
-        // authoritative gate, and the resume-time recheck self-inflicts a
-        // denial-of-service when a probe flaps during the foreground
-        // transition.
         if (vaultFlight || commonFlight) return
         Tamper.invalidate()
         if (Tamper.check(applicationContext).hardFail) {
@@ -237,7 +263,7 @@ class MainActivity : FragmentActivity() {
     }
 }
 
-private enum class Stage { Setup, Unlock, List, Add, Folders, Diagnostics }
+private enum class Stage { Setup, Unlock, List, Add, Folders, Diagnostics, Recovery, Reset, Export, ExportDo, Import, Viewer }
 
 @Composable
 private fun VaultFolderRoot(
@@ -245,30 +271,49 @@ private fun VaultFolderRoot(
     unlockedRef: () -> VaultFolderStore?,
     setUnlocked: (VaultFolderStore?) -> Unit,
     onClose: () -> Unit,
-    depositUri: android.net.Uri? = null,
+    depositUri: Uri? = null,
 ) {
     val ctx = LocalContext.current
-    // String-encoded saveable state — rememberSaveable<Enum> via the
-    // AutoSaver was not reliably restoring on Samsung in earlier tests
-    // (the shipped APK contained the "cannot be saved" Compose error
-    // string). Round-tripping via String.name is bulletproof.
-    var stageName by rememberSaveable {
-        mutableStateOf(if (VaultFolder.exists(ctx)) Stage.Unlock.name else Stage.Setup.name)
+    // §4 detection: if the device-auth key was invalidated (fingerprint
+    // re-enrolled / lock-screen changed) the vault can't be unlocked. Skip the
+    // doomed BiometricPrompt and land on Recovery straight away.
+    val initialStage = remember {
+        when {
+            !VaultFolder.exists(ctx) -> Stage.Setup
+            VaultRecovery.keyStateAtStartup(ctx, headerExists = true) ==
+                VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED -> Stage.Recovery
+            else -> Stage.Unlock
+        }.name
     }
+    // String-encoded saveable state — rememberSaveable<Enum> via the AutoSaver
+    // was not reliably restoring on Samsung. Round-tripping via String.name is
+    // bulletproof.
+    var stageName by rememberSaveable { mutableStateOf(initialStage) }
     val stage = remember(stageName) { Stage.valueOf(stageName) }
     val setStage: (Stage) -> Unit = {
         Diagnostics.log("vault-folder.Root", "stage transition: $stageName → ${it.name}")
         stageName = it.name
     }
-    // Single-shot incoming deposit URI — consumed once on first entry
-    // to Stage.Add. Kept as plain `remember` because configChanges in
-    // the manifest skip recreation; if that ever changes the worst
-    // case is the user re-triggers via the file manager.
+
+    // The deposit URI: cold-launch value or a warm-task onNewIntent value. Merge
+    // both into one holder; the confirm dialog consumes it.
+    val warmDeposit = VaultFolderManager.pendingDepositUri
     var pendingDeposit by remember { mutableStateOf(depositUri) }
+    LaunchedEffect(warmDeposit) {
+        if (warmDeposit != null) {
+            pendingDeposit = warmDeposit
+            VaultFolderManager.pendingDepositUri = null
+            // Route an unlocked session to Add; a locked one lands there after
+            // the next unlock (Stage.Unlock's onUnlocked checks pendingDeposit).
+            if (unlockedRef() != null && stage != Stage.Add) setStage(Stage.Add)
+        }
+    }
+
     val backToList: () -> Unit = {
         pendingDeposit = null
         setStage(Stage.List)
     }
+
     when (stage) {
         Stage.Setup -> {
             KeepAliveBackHandler("vault-folder.Root.Setup")
@@ -279,10 +324,38 @@ private fun VaultFolderRoot(
         }
         Stage.Unlock -> {
             KeepAliveBackHandler("vault-folder.Root.Unlock")
-            UnlockScreen(activity = activity, onUnlocked = {
-                setUnlocked(it)
-                setStage(if (pendingDeposit != null) Stage.Add else Stage.List)
-            }, onClose = onClose)
+            UnlockScreen(
+                activity = activity,
+                onUnlocked = {
+                    setUnlocked(it)
+                    setStage(if (pendingDeposit != null) Stage.Add else Stage.List)
+                },
+                onInvalidated = { setStage(Stage.Recovery) },
+                onClose = onClose,
+            )
+        }
+        Stage.Recovery -> {
+            KeepAliveBackHandler("vault-folder.Root.Recovery")
+            RecoveryScreen(
+                activity = activity,
+                onRebound = { setStage(Stage.Unlock) },
+                onReset = { setStage(Stage.Reset) },
+                onClose = onClose,
+            )
+        }
+        Stage.Reset -> {
+            KeepAliveBackHandler("vault-folder.Root.Reset")
+            // Reset is reached from Recovery (device-auth key invalidated), so
+            // the vault can't be unlocked and export-first is impossible — the
+            // shared screen skips it and goes EXPLAIN → CONFIRM_WIPE. A user who
+            // still has a working vault should use the list's Backup action
+            // BEFORE resetting; the EXPLAIN copy says so.
+            VaultRecoveryScreen(
+                keyUsable = false,
+                appName = stringResource(R.string.app_name),
+                hooks = remember { VaultFolderResetHooks(onSetup = { setStage(Stage.Setup) }) },
+                onExportFirst = null,
+            )
         }
         Stage.List -> {
             val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
@@ -293,7 +366,54 @@ private fun VaultFolderRoot(
                 onFolders = { setStage(Stage.Folders) },
                 onLock = { v.lock(); setUnlocked(null); onClose() },
                 onDiagnostics = { setStage(Stage.Diagnostics) },
+                onExportBackup = { setStage(Stage.Export) },
+                onImportBackup = { setStage(Stage.Import) },
+                onView = { entry -> viewerEntryId = entry.id; setStage(Stage.Viewer) },
             )
+        }
+        Stage.Viewer -> {
+            val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
+            val entry = v.contents.entries.firstOrNull { it.id == viewerEntryId }
+            if (entry == null) { backToList(); return }
+            BackHandler { backToList() }
+            ViewerScreen(store = v, entry = entry, onBack = backToList)
+        }
+        Stage.Export -> {
+            unlockedRef() ?: return run { setStage(Stage.Unlock) }
+            BackHandler { setStage(Stage.List) }
+            // A recovery export is encrypted under the user's recovery key. We
+            // do NOT retain that key in memory, so the user re-enters it here
+            // (they saved it at setup) — the key gate makes the export both
+            // real and honest. It's verified against the stored verifier so a
+            // typo can't produce an unrecoverable file.
+            ExportKeyGate(
+                onKey = { key ->
+                    // hand off to the shared export screen with the entered key
+                    exportKeyChars = key
+                    setStage(Stage.ExportDo)
+                },
+                onBack = { setStage(Stage.List) },
+            )
+        }
+        Stage.ExportDo -> {
+            val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
+            val key = exportKeyChars ?: return run { setStage(Stage.Export) }
+            BackHandler { setStage(Stage.List) }
+            VaultExportScreen(
+                port = remember { VaultFolderExportPort() },
+                unlocked = v,
+                recoveryKey = key,
+                onDone = {
+                    key.fill(' '); exportKeyChars = null
+                    setStage(Stage.List)
+                },
+            )
+        }
+        Stage.Import -> {
+            val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
+            BackHandler { setStage(Stage.List) }
+            val port = remember { VaultFolderExportPort().also { it.importTarget = v } }
+            VaultImportScreen(port = port, onDone = { setStage(Stage.List) })
         }
         Stage.Folders -> {
             val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
@@ -302,10 +422,6 @@ private fun VaultFolderRoot(
                 activity = activity,
                 currentFolderId = v.folderId,
                 onOpenFolder = { newStore ->
-                    // If user opened the same folder, we already have its
-                    // store; the FoldersScreen short-circuits via onBack.
-                    // Otherwise we lock the previous store and adopt the
-                    // newly-unlocked one.
                     if (newStore.folderId != v.folderId) {
                         v.lock()
                     }
@@ -318,10 +434,8 @@ private fun VaultFolderRoot(
         Stage.Add -> {
             val v = unlockedRef() ?: return run { setStage(Stage.Unlock) }
             BackHandler { backToList() }
-            // Consume the deposit URI once: capture into a local and
-            // null the holder so a recomposition doesn't replay the
-            // auto-add. The Add screen runs its existing flow on the
-            // pre-supplied URI without bouncing through the picker.
+            // Consume the deposit URI once: capture into a local and null the
+            // holder so a recomposition doesn't replay the auto-add.
             val incoming = pendingDeposit
             if (incoming != null) {
                 pendingDeposit = null
@@ -336,6 +450,78 @@ private fun VaultFolderRoot(
         Stage.Diagnostics -> {
             BackHandler { backToList() }
             DiagnosticsScreen(onBack = backToList)
+        }
+    }
+}
+
+// Process-scoped scratch for cross-stage hand-offs. Not persisted; recreated on
+// process death (which locks the vault anyway).
+private var viewerEntryId: String? = null
+private var exportKeyChars: CharArray? = null
+
+/**
+ * Gate before a recovery export: the user re-enters their recovery key (they
+ * saved it at setup). The key is verified against the stored verifier so a typo
+ * can't produce an unrecoverable file. Shown only when a recovery key was
+ * enrolled — otherwise there is no recovery-encrypted export to make, and the
+ * screen says so honestly.
+ */
+@Composable
+private fun ExportKeyGate(onKey: (CharArray) -> Unit, onBack: () -> Unit) {
+    val ctx = LocalContext.current
+    val enrolled = remember { RecoveryStateStore.exists(ctx) }
+    var field by remember { mutableStateOf("") }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    Column(
+        modifier = Modifier.fillMaxSize().padding(20.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text("Export recovery backup", style = MaterialTheme.typography.titleLarge)
+        if (!enrolled) {
+            Text(
+                "No recovery key was enrolled for this vault, so there is no " +
+                    "recovery-encrypted backup to make. Use the per-file Export " +
+                    "action in the list to save an individual file instead.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.action_back))
+            }
+            return@Column
+        }
+        Text(
+            "Enter your recovery key. The backup is encrypted so only this key can " +
+                "open it.",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = field,
+            onValueChange = { field = it },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodyMedium) }
+        Button(
+            onClick = {
+                val state = RecoveryStateStore.load(ctx)
+                if (state == null) { error = "Recovery state unavailable."; return@Button }
+                val entered = VaultRecovery.recoveryKeyFrom(field.toCharArray())
+                val ok = VaultRecovery.verifyRecoveryKey(entered, state.verifier, state.verifierSalt)
+                if (!ok) {
+                    entered.wipe()
+                    error = RecoveryCopy.IMPORT_WRONG_KEY
+                } else {
+                    onKey(entered.chars)
+                }
+            },
+            enabled = field.isNotBlank(),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Continue") }
+        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
+            Text(stringResource(R.string.action_back))
         }
     }
 }
@@ -366,15 +552,24 @@ private fun SetupScreen(
     onClose: () -> Unit,
 ) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var step by remember { mutableIntStateOf(0) }
     var error by remember { mutableStateOf<String?>(null) }
     val deviceIssue = remember { deviceUnsupportedReason(ctx) }
+
+    // §4.3 recovery escrow: the recovery key minted for this setup (shown to the
+    // user in step 1), and whether the user chose to enroll it. Held in plain
+    // remember — process-bound, wiped on leave.
+    val recoveryKey = remember { VaultRecovery.newRecoveryKey() }
+    var enrollRecovery by remember { mutableStateOf(true) }
+    var savedConfirmed by remember { mutableStateOf(false) }
+    DisposableEffect(Unit) { onDispose { recoveryKey.wipe() } }
 
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("vault folder — first-time setup", color = Color(0xFFE0E0E0), fontSize = 22.sp)
+        Text("first-time setup", color = Color(0xFFE0E0E0), fontSize = 22.sp)
         if (deviceIssue != null) {
             Box(modifier = Modifier.fillMaxWidth()
                 .background(Color(0xFF3D2A00), RoundedCornerShape(6.dp))
@@ -399,35 +594,95 @@ private fun SetupScreen(
                     Text(
                         "Per-file size cap: 20 MiB. Vault-folder is for documents, keys, " +
                             "recovery codes, photos — not video archives.\n\n" +
-                            "Lost device = lost vault. The Keystore-wrapped master cannot " +
-                            "leave this device. Use backups (#7 in the suite) for off-device " +
-                            "recoverable copies.",
+                            stringResource(R.string.setup_recovery_prompt),
                         color = Color(0xFFFFB74D), fontSize = 11.sp,
                     )
                 }
+                // §4.4 backup honesty — no false "#7 backups" claim.
+                Text(
+                    stringResource(R.string.backup_offdevice),
+                    color = Color(0xFF9E9E9E), fontSize = 11.sp,
+                )
                 Button(onClick = { step = 1 }, modifier = Modifier.fillMaxWidth()) {
                     Text("Self-generate vault")
                 }
                 OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
             }
             1 -> {
+                // §4.3: recovery-key enrollment choice BEFORE binding.
+                Text(RecoveryCopy.RECOVERY_KEY_TITLE, color = Color(0xFFE0E0E0), fontSize = 18.sp)
+                Text(RecoveryCopy.RECOVERY_KEY_BODY, color = Color(0xFF9E9E9E), fontSize = 12.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text("Save a recovery key", color = Color(0xFFE0E0E0),
+                        fontSize = 13.sp, modifier = Modifier.weight(1f))
+                    Switch(checked = enrollRecovery, onCheckedChange = { enrollRecovery = it })
+                }
+                if (enrollRecovery) {
+                    Box(modifier = Modifier.fillMaxWidth()
+                        .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
+                        .padding(12.dp)) {
+                        Text(
+                            com.understory.security.RecoveryKeyCodec.grouped(recoveryKey.chars),
+                            color = Color(0xFFE0E0E0), fontSize = 15.sp,
+                        )
+                    }
+                    Text(stringResource(R.string.setup_recovery_key_hint),
+                        color = Color(0xFF9E9E9E), fontSize = 11.sp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(checked = savedConfirmed, onCheckedChange = { savedConfirmed = it })
+                        Text(stringResource(R.string.setup_recovery_saved_confirm),
+                            color = Color(0xFFE0E0E0), fontSize = 12.sp)
+                    }
+                }
+                error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
+                Button(
+                    onClick = { step = 2 },
+                    enabled = !enrollRecovery || savedConfirmed,
+                    modifier = Modifier.fillMaxWidth(),
+                ) { Text(if (enrollRecovery) "Continue" else "Continue without a recovery key") }
+                OutlinedButton(onClick = { step = 0 }, modifier = Modifier.fillMaxWidth()) { Text("Back") }
+            }
+            2 -> {
                 Text("Authenticate with your device to bind the vault master key.",
                     color = Color(0xFF9E9E9E), fontSize = 12.sp)
                 error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
                 LaunchedEffect(Unit) {
                     runCatching {
                         val cipher = Crypto.deviceAuthCipherForEncrypt()
-                        promptAuth(activity, "Bind vault-folder to this device", cipher,
+                        promptDeviceAuth(activity, "Bind vault-folder to this device",
+                            "vault-folder", cipher,
                             onSuccess = { authed ->
-                                runCatching {
-                                    val v = VaultFolder.create(ctx, authed)
-                                    if (activity.lifecycle.currentState
-                                            .isAtLeast(Lifecycle.State.STARTED)
-                                    ) onCreated(v) else v.lock()
-                                }.onFailure { error = "Setup failed: ${it.message}" }
+                                scope.launch {
+                                    val outcome = runCatching {
+                                        withContext(Bg.io) {
+                                            val keyChars = if (enrollRecovery) recoveryKey.chars else null
+                                            val v = VaultFolder.create(ctx, authed, recoveryKeyChars = keyChars)
+                                            if (enrollRecovery) {
+                                                // Persist the recovery verifier so a later
+                                                // recovery / import can check the key.
+                                                RecoveryStateStore.save(
+                                                    ctx,
+                                                    VaultRecovery.enroll(recoveryKey, itemCount = 0),
+                                                )
+                                            }
+                                            v
+                                        }
+                                    }
+                                    outcome.fold(
+                                        onSuccess = { v ->
+                                            if (activity.lifecycle.currentState
+                                                    .isAtLeast(Lifecycle.State.STARTED)
+                                            ) onCreated(v) else v.lock()
+                                        },
+                                        onFailure = { error = "Setup failed: ${it.message}" },
+                                    )
+                                }
                             },
                             onError = { msg -> error = "Authentication failed: $msg" },
-                            onCancel = { error = "Authentication cancelled."; step = 0 },
+                            onCancel = { error = "Authentication cancelled."; step = 1 },
                         )
                     }.onFailure { error = "Crypto init failed: ${it.message}" }
                 }
@@ -440,6 +695,7 @@ private fun SetupScreen(
 private fun UnlockScreen(
     activity: FragmentActivity,
     onUnlocked: (VaultFolderStore) -> Unit,
+    onInvalidated: () -> Unit,
     onClose: () -> Unit,
 ) {
     val ctx = LocalContext.current
@@ -450,7 +706,7 @@ private fun UnlockScreen(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("vault folder — unlock", color = Color(0xFFE0E0E0), fontSize = 22.sp)
+        Text("unlock", color = Color(0xFFE0E0E0), fontSize = 22.sp)
         Text("Authenticate with your device biometric or PIN.",
             color = Color(0xFF9E9E9E), fontSize = 13.sp)
         error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
@@ -462,7 +718,7 @@ private fun UnlockScreen(
                 runCatching {
                     val iv = VaultFolder.ivForUnlock(ctx)
                     val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
-                    promptAuth(activity, "Unlock vault-folder", cipher,
+                    promptDeviceAuth(activity, "Unlock vault-folder", "vault-folder", cipher,
                         onSuccess = { authed ->
                             runCatching {
                                 val v = VaultFolder.unlock(ctx, authed)
@@ -470,14 +726,24 @@ private fun UnlockScreen(
                                         .isAtLeast(Lifecycle.State.STARTED)
                                 ) onUnlocked(v) else { v.lock(); working = false }
                             }.onFailure {
-                                error = "Vault decryption failed."; working = false
+                                working = false
+                                // §4: distinguish a permanent key invalidation
+                                // (route to recovery) from a transient failure.
+                                if (VaultRecovery.classifyUnlockFailure(it) ==
+                                    VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                                ) onInvalidated()
+                                else error = "Vault decryption failed."
                             }
                         },
                         onError = { msg -> error = "Authentication failed: $msg"; working = false },
                         onCancel = { error = "Authentication cancelled."; working = false },
                     )
                 }.onFailure {
-                    error = "Crypto init failed: ${it.message}"; working = false
+                    working = false
+                    if (VaultRecovery.classifyUnlockFailure(it) ==
+                        VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                    ) onInvalidated()
+                    else error = "Crypto init failed: ${it.message}"
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -488,38 +754,12 @@ private fun UnlockScreen(
     }
 }
 
-private fun promptAuth(
-    activity: FragmentActivity,
-    title: String,
-    cipher: Cipher,
-    onSuccess: (Cipher) -> Unit,
-    onError: (String) -> Unit,
-    onCancel: () -> Unit,
-) {
-    val executor = ContextCompat.getMainExecutor(activity)
-    val callback = object : BiometricPrompt.AuthenticationCallback() {
-        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-            val c = result.cryptoObject?.cipher
-            if (c == null) onError("no cipher") else onSuccess(c)
-        }
-        override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
-            if (errorCode in setOf(
-                    BiometricPrompt.ERROR_USER_CANCELED,
-                    BiometricPrompt.ERROR_NEGATIVE_BUTTON,
-                    BiometricPrompt.ERROR_CANCELED,
-                )) onCancel() else onError(errString.toString())
-        }
-    }
-    val prompt = BiometricPrompt(activity, executor, callback)
-    val info = BiometricPrompt.PromptInfo.Builder()
-        .setTitle(title)
-        .setSubtitle("vault-folder")
-        .setAllowedAuthenticators(
-            BiometricManager.Authenticators.BIOMETRIC_STRONG or
-                BiometricManager.Authenticators.DEVICE_CREDENTIAL,
-        )
-        .build()
-    prompt.authenticate(info, BiometricPrompt.CryptoObject(cipher))
+/** UI-facing operation state for a threaded crypto/IO action (§2.2). */
+private sealed interface OpState {
+    data object Idle : OpState
+    data object Working : OpState
+    data class Done(val msg: String) : OpState
+    data class Failed(val msg: String) : OpState
 }
 
 @Composable
@@ -529,40 +769,49 @@ private fun ListScreen(
     onFolders: () -> Unit,
     onLock: () -> Unit,
     onDiagnostics: () -> Unit,
+    onExportBackup: () -> Unit,
+    onImportBackup: () -> Unit,
+    onView: (VaultFolderEntry) -> Unit,
 ) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var revision by remember { mutableIntStateOf(0) }
     var deleteCandidate by remember { mutableStateOf<VaultFolderEntry?>(null) }
+    var exportState by remember { mutableStateOf<OpState>(OpState.Idle) }
 
-    val createOutput = rememberLauncherForActivityResult(
-        ActivityResultContracts.CreateDocument("application/octet-stream"),
-    ) { /* handled via state below — we set this up lazily */ }
-
-    // We need per-export state since CreateDocument is per-launch.
-    // pendingExport is rememberSaveable so it survives activity recreation
-    // during the SAF round-trip on Samsung — without this, the export
-    // target reference is gone when the picker returns and the export
-    // silently no-ops.
-    var pendingExport by rememberSaveable { mutableStateOf<VaultFolderEntry?>(null) }
+    // §1.2 crash fix: hold the entry ID STRING (natively saveable), never the
+    // non-Parcelable VaultFolderEntry, across the SAF round-trip. On return we
+    // re-resolve the id against live metadata, which also fixes the stale-object
+    // hazard (exporting a snapshot that no longer matches disk).
+    var pendingExportId by rememberSaveable { mutableStateOf<String?>(null) }
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/octet-stream"),
     ) { uri: Uri? ->
         Diagnostics.log("vault-folder.List",
             "exportLauncher result: uri=${if (uri != null) "non-null" else "null"}")
         VaultFolderManager.endTransientFlight()
-        val target = pendingExport
-        pendingExport = null
-        if (uri != null && target != null) {
-            runCatching { store.exportFile(target, uri) }
-                .onSuccess {
+        val target = pendingExportId?.let { id -> store.contents.entries.firstOrNull { it.id == id } }
+        pendingExportId = null
+        if (uri == null) return@rememberLauncherForActivityResult
+        if (target == null) {
+            Toast.makeText(ctx, "Nothing to export — file no longer available", Toast.LENGTH_SHORT).show()
+            return@rememberLauncherForActivityResult
+        }
+        // §2: run decrypt+write off the main thread; surface a real state.
+        exportState = OpState.Working
+        scope.launch {
+            val outcome = withContext(Bg.io) { runCatching { store.exportFile(target, uri) } }
+            exportState = outcome.fold(
+                onSuccess = {
                     Diagnostics.log("vault-folder.List", "exported ${target.name} ok")
-                    Toast.makeText(ctx, "Exported ${target.name}", Toast.LENGTH_SHORT).show()
-                }
-                .onFailure {
+                    OpState.Done("Exported ${target.name}")
+                },
+                onFailure = {
                     Diagnostics.error("vault-folder.List",
                         "export failed: ${it.javaClass.simpleName}: ${it.message}")
-                    Toast.makeText(ctx, "Export failed: ${it.message}", Toast.LENGTH_LONG).show()
-                }
+                    OpState.Failed("Export failed: ${it.message}")
+                },
+            )
         }
     }
 
@@ -572,7 +821,7 @@ private fun ListScreen(
     ) {
         Row(modifier = Modifier.fillMaxWidth()) {
             Column(modifier = Modifier.weight(1f)) {
-                Text("vault folder", color = Color(0xFFE0E0E0), fontSize = 22.sp)
+                Text("file vault", color = Color(0xFFE0E0E0), fontSize = 22.sp)
                 Text(
                     "${store.contents.entries.size} file(s)",
                     color = Color(0xFF9E9E9E), fontSize = 12.sp,
@@ -580,16 +829,9 @@ private fun ListScreen(
             }
         }
         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            // Per SAMSUNG_QUIRKS.md: navigation is plain Button. Lock is
-            // also plain — locking is a non-destructive operation (worst
-            // case the user has to re-authenticate).
             Button(onClick = onAdd, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Add file") }
             OutlinedButton(onClick = onLock, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Lock") }
         }
-        // Multi-folder hub. Surfaces the current folder name and routes
-        // to the FoldersScreen for switching / creating / deleting. The
-        // default-folder install sees this row too — it's the entry
-        // point to creating a second folder for users who want one.
         OutlinedButton(onClick = onFolders, modifier = Modifier.fillMaxWidth()) {
             val label = if (store.folderId == VaultFolder.DEFAULT_FOLDER_ID)
                 "Folder: Default · switch / create"
@@ -598,6 +840,22 @@ private fun ListScreen(
         }
 
         @Suppress("UNUSED_EXPRESSION") revision
+
+        when (val s = exportState) {
+            is OpState.Working -> {
+                Text("Exporting…", color = Color(0xFFFFB74D), fontSize = 12.sp)
+                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+            is OpState.Done -> {
+                Text(s.msg, color = Color(0xFF81C784), fontSize = 12.sp)
+                LaunchedEffect(s) { Toast.makeText(ctx, s.msg, Toast.LENGTH_SHORT).show(); exportState = OpState.Idle }
+            }
+            is OpState.Failed -> {
+                Text(s.msg, color = Color(0xFFEF5350), fontSize = 12.sp)
+                LaunchedEffect(s) { Toast.makeText(ctx, s.msg, Toast.LENGTH_LONG).show(); exportState = OpState.Idle }
+            }
+            OpState.Idle -> {}
+        }
 
         if (store.contents.entries.isEmpty()) {
             Spacer(Modifier.height(20.dp))
@@ -612,20 +870,32 @@ private fun ListScreen(
                 items(store.contents.entries, key = { it.id }) { entry ->
                     EntryRow(
                         entry = entry,
+                        canView = ViewerSupport.isSupported(entry.mimeType),
+                        busy = exportState is OpState.Working,
+                        onView = { onView(entry) },
                         onExport = {
                             Diagnostics.log("vault-folder.List", "export tap: ${entry.name}")
-                            pendingExport = entry
+                            pendingExportId = entry.id
                             VaultFolderManager.beginTransientFlight()
                             runCatching { exportLauncher.launch(entry.name) }
                                 .onFailure {
                                     Diagnostics.error("vault-folder.List",
                                         "exportLauncher.launch threw: ${it.javaClass.simpleName}: ${it.message}")
                                     VaultFolderManager.endTransientFlight()
+                                    pendingExportId = null
                                 }
                         },
                         onDelete = { deleteCandidate = entry },
                     )
                 }
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(onClick = onExportBackup, modifier = Modifier.weight(1f)) {
+                Text("Backup")
+            }
+            OutlinedButton(onClick = onImportBackup, modifier = Modifier.weight(1f)) {
+                Text("Restore")
             }
         }
         OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
@@ -661,9 +931,18 @@ private fun ListScreen(
                     if (!dialogView.hasWindowFocus()) return@TextButton
                     val target = entry
                     deleteCandidate = null
-                    runCatching { store.deleteFile(target); revision++ }
-                        .onSuccess { Toast.makeText(ctx, "Deleted ${target.name}", Toast.LENGTH_SHORT).show() }
-                        .onFailure { Toast.makeText(ctx, "Delete failed: ${it.message}", Toast.LENGTH_LONG).show() }
+                    scope.launch {
+                        val outcome = withContext(Bg.io) { runCatching { store.deleteFile(target) } }
+                        outcome.fold(
+                            onSuccess = {
+                                revision++
+                                Toast.makeText(ctx, "Deleted ${target.name}", Toast.LENGTH_SHORT).show()
+                            },
+                            onFailure = {
+                                Toast.makeText(ctx, "Delete failed: ${it.message}", Toast.LENGTH_LONG).show()
+                            },
+                        )
+                    }
                 }) { Text("Delete", color = Color(0xFFEF5350)) }
             },
             dismissButton = {
@@ -676,6 +955,9 @@ private fun ListScreen(
 @Composable
 private fun EntryRow(
     entry: VaultFolderEntry,
+    canView: Boolean,
+    busy: Boolean,
+    onView: () -> Unit,
     onExport: () -> Unit,
     onDelete: () -> Unit,
 ) {
@@ -692,16 +974,15 @@ private fun EntryRow(
             )
             Spacer(Modifier.height(6.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                // Export: plain OutlinedButton (launches SAF picker only;
-                // export bytes flow only after the user explicitly chooses
-                // a destination in the system picker).
-                OutlinedButton(onClick = onExport, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                if (canView) {
+                    OutlinedButton(onClick = onView, enabled = !busy, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.viewer_action))
+                    }
+                }
+                OutlinedButton(onClick = onExport, enabled = !busy, modifier = Modifier.weight(1f)) {
                     Text("Export")
                 }
-                // Delete stays SecureOutlinedButton — taps a confirmation
-                // dialog whose "Delete" action irreversibly destroys the
-                // encrypted blob. Tap-jacking that path matters.
-                SecureOutlinedButton(onClick = onDelete, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                SecureOutlinedButton(onClick = onDelete, enabled = !busy, modifier = Modifier.weight(1f)) {
                     Text("Delete")
                 }
             }
@@ -717,59 +998,59 @@ private fun AddScreen(
     incomingUri: Uri? = null,
 ) {
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var status by remember { mutableStateOf<String?>(null) }
-    var working by remember { mutableStateOf(false) }
-    // The toggle is stateful to the screen; default off so the
-    // common case (read-only ingest) is the path-of-no-surprise.
+    var opState by remember { mutableStateOf<OpState>(OpState.Idle) }
+    val working = opState is OpState.Working
     var shredSource by rememberSaveable { mutableStateOf(false) }
-    // Pending uri awaiting confirmation before running the shred path.
-    // Plain remember (not Saveable) — Uri is process-bound and the
-    // confirm dialog is a momentary modal.
     var pendingShredConfirm by remember { mutableStateOf<Uri?>(null) }
+    // §3.2: a deposit (ACTION_VIEW incoming URI) MUST be confirmed before it is
+    // encrypted into the vault, independent of the shred toggle.
+    var pendingDepositConfirm by remember { mutableStateOf<Uri?>(null) }
 
-    // Shared add-file body: factored out so both the SAF picker callback
-    // and the LaunchedEffect for an incoming "Open with…" deposit URI
-    // run the exact same path. Honors [shredSource]; the caller has
-    // already gone through the confirm dialog when shred is requested.
     fun runAdd(uri: Uri) {
-        working = true
+        opState = OpState.Working
+        status = null
         val opts = if (shredSource) IngestOptions.SHRED_SOURCE else IngestOptions.READ_ONLY
-        runCatching {
-            val (name, mime) = queryDisplayMetadata(ctx, uri)
-            store.addFile(uri, name, mime, opts)
-        }.onSuccess { result ->
-            Diagnostics.log("vault-folder.Add",
-                "addFile ok: ${result.entry.name} (${result.entry.sizeBytes} B) " +
-                    "shred=${result.javaClass.simpleName}")
-            status = when (result) {
-                is AddResult.Added ->
-                    "Added ${result.entry.name} (${humanSize(result.entry.sizeBytes)})"
-                is AddResult.AddedSourceShredded ->
-                    "Added ${result.entry.name} · source shredded"
-                is AddResult.AddedSourceShredFailed ->
-                    "Added ${result.entry.name} · shred failed: ${result.reason} " +
-                        "(your encrypted copy is safe; delete the source manually)"
+        scope.launch {
+            val outcome = withContext(Bg.io) {
+                runCatching {
+                    val (name, mime) = queryDisplayMetadata(ctx, uri)
+                    store.addFile(uri, name, mime, opts)
+                }
             }
-            Toast.makeText(ctx, status, Toast.LENGTH_LONG).show()
-            // Only navigate back on full success (Added or
-            // AddedSourceShredded). On shred-failed, stay on the
-            // screen so the user reads the message.
-            if (result !is AddResult.AddedSourceShredFailed) onSaved()
-        }.onFailure {
-            Diagnostics.error("vault-folder.Add",
-                "addFile failed: ${it.javaClass.simpleName}: ${it.message}")
-            status = "Add failed: ${it.message ?: it.javaClass.simpleName}"
+            outcome.fold(
+                onSuccess = { result ->
+                    Diagnostics.log("vault-folder.Add",
+                        "addFile ok: ${result.entry.name} (${result.entry.sizeBytes} B) " +
+                            "shred=${result.javaClass.simpleName}")
+                    val msg = when (result) {
+                        is AddResult.Added ->
+                            "Added ${result.entry.name} (${humanSize(result.entry.sizeBytes)})"
+                        is AddResult.AddedSourceShredded ->
+                            "Added ${result.entry.name} · source shredded"
+                        is AddResult.AddedSourceShredFailed ->
+                            "Added ${result.entry.name} · shred failed: ${result.reason} " +
+                                "(your encrypted copy is safe; delete the source manually)"
+                    }
+                    status = msg
+                    opState = OpState.Idle
+                    Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                    if (result !is AddResult.AddedSourceShredFailed) onSaved()
+                },
+                onFailure = {
+                    Diagnostics.error("vault-folder.Add",
+                        "addFile failed: ${it.javaClass.simpleName}: ${it.message}")
+                    status = "Add failed: ${it.message ?: it.javaClass.simpleName}"
+                    opState = OpState.Idle
+                },
+            )
         }
-        working = false
     }
 
-    /** Entry point that respects the confirm dialog when shred is on. */
+    /** Entry point that respects the shred confirm dialog when shred is on. */
     fun beginAdd(uri: Uri) {
-        if (shredSource) {
-            pendingShredConfirm = uri
-        } else {
-            runAdd(uri)
-        }
+        if (shredSource) pendingShredConfirm = uri else runAdd(uri)
     }
 
     val pickInput = rememberLauncherForActivityResult(
@@ -779,18 +1060,17 @@ private fun AddScreen(
             "pickInput result: uri=${if (uri != null) "non-null" else "null"}")
         VaultFolderManager.endTransientFlight()
         if (uri == null) return@rememberLauncherForActivityResult
+        // Picker-originated add: the user already chose the file in the system
+        // picker, so no second deposit-confirm here (§3.2).
         beginAdd(uri)
     }
 
-    // Auto-add path for cross-app deposits: when the activity was
-    // launched via ACTION_VIEW and the user-unlocked-the-vault step has
-    // landed us on Stage.Add, run the same encrypt-into-vault flow on
-    // the supplied URI. The parent already nulls pendingDeposit after
-    // first entry, so a recomposition won't replay this.
+    // §3.2: an incoming deposit URI populates the confirm dialog instead of
+    // silently encrypting — fixes the false "we confirm before encrypting" claim.
     LaunchedEffect(incomingUri) {
         if (incomingUri != null) {
-            Diagnostics.log("vault-folder.Add", "auto-add from incoming URI")
-            beginAdd(incomingUri)
+            Diagnostics.log("vault-folder.Add", "deposit received → confirm interstitial")
+            pendingDepositConfirm = incomingUri
         }
     }
 
@@ -804,13 +1084,9 @@ private fun AddScreen(
                 "this vault's master key. Per-file cap: 20 MiB.",
             color = Color(0xFF9E9E9E), fontSize = 12.sp,
         )
-        // Plain Button, NOT SecureButton — the tap-jacking guard's
-        // partial-obscure check rejected taps under Samsung Edge Panel
-        // and the SAF picker silently never opened. Tap-jacking the
-        // "Pick a file" button is non-destructive (it just launches the
-        // system SAF picker which has its own anti-overlay defenses).
         Button(
             onClick = {
+                if (working) return@Button
                 Diagnostics.log("vault-folder.Add", "Pick a file: tap")
                 VaultFolderManager.beginTransientFlight()
                 runCatching { pickInput.launch(arrayOf("*/*")) }
@@ -820,31 +1096,22 @@ private fun AddScreen(
                         VaultFolderManager.endTransientFlight()
                     }
             },
+            enabled = !working,
             modifier = Modifier.fillMaxWidth(),
         ) {
             Text(if (working) "Encrypting…" else "Pick a file")
         }
+        if (working) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
-        // Shred toggle. Off by default — the common case is to keep
-        // the source. When on, the picker callback routes through a
-        // confirm dialog before the encrypt+delete runs. Whether the
-        // delete actually succeeds depends on the URI grant — see
-        // VaultFolderStore.addFile docs and AddResult.
-        androidx.compose.foundation.layout.Row(
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(
-                    androidx.compose.ui.graphics.Color(0xFF1C1C1C),
-                    androidx.compose.foundation.shape.RoundedCornerShape(6.dp),
-                )
+                .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
                 .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(modifier = Modifier.fillMaxWidth(0.85f)) {
-                Text(
-                    "Delete source after import",
-                    color = Color(0xFFE0E0E0), fontSize = 13.sp,
-                )
+                Text("Delete source after import", color = Color(0xFFE0E0E0), fontSize = 13.sp)
                 Text(
                     if (shredSource)
                         "On — you'll confirm before each shred. Only works on URIs " +
@@ -855,23 +1122,61 @@ private fun AddScreen(
                     color = Color(0xFF9E9E9E), fontSize = 11.sp,
                 )
             }
-            androidx.compose.material3.Switch(
+            Switch(
                 checked = shredSource,
+                enabled = !working,
                 onCheckedChange = {
                     shredSource = it
-                    Diagnostics.log("vault-folder.Add",
-                        "shred toggle: ${if (it) "ON" else "OFF"}")
+                    Diagnostics.log("vault-folder.Add", "shred toggle: ${if (it) "ON" else "OFF"}")
                 },
             )
         }
 
         status?.let { Text(it, color = Color(0xFFFFB74D), fontSize = 12.sp) }
         Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = onCancel, modifier = Modifier.fillMaxWidth()) { Text("Back") }
+        OutlinedButton(onClick = onCancel, enabled = !working, modifier = Modifier.fillMaxWidth()) { Text("Back") }
+    }
+
+    // §3.2 deposit-confirm interstitial. Renders metadata ONLY (no content
+    // render) so a hostile deposit can't paint UI. On confirm it routes through
+    // beginAdd (which still shows the shred confirm if the user has shred on).
+    pendingDepositConfirm?.let { uri ->
+        val meta = remember(uri) { queryDisplayMetadata(ctx, uri) }
+        val displayName = remember(meta) { clampName(meta.first) }
+        val sizeText = remember(uri) { humanSize(queryDisplaySize(ctx, uri)) }
+        val folderLabel = if (store.folderId == VaultFolder.DEFAULT_FOLDER_ID) "Default"
+            else store.folderId.take(8) + "…"
+        AlertDialog(
+            onDismissRequest = { pendingDepositConfirm = null; status = ctx.getString(R.string.deposit_cancelled) },
+            title = { Text(stringResource(R.string.deposit_confirm_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.deposit_confirm_body,
+                        displayName,
+                        meta.second ?: "application/octet-stream",
+                        sizeText,
+                        folderLabel,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    pendingDepositConfirm = null
+                    beginAdd(uri)
+                }) { Text(stringResource(R.string.deposit_confirm_add)) }
+            },
+            dismissButton = {
+                TextButton(onClick = {
+                    pendingDepositConfirm = null
+                    status = ctx.getString(R.string.deposit_cancelled)
+                }) { Text(stringResource(R.string.action_cancel)) }
+            },
+        )
     }
 
     pendingShredConfirm?.let { uri ->
-        androidx.compose.material3.AlertDialog(
+        AlertDialog(
             onDismissRequest = { pendingShredConfirm = null },
             title = { Text("Shred source after import?") },
             text = {
@@ -885,16 +1190,14 @@ private fun AddScreen(
                 )
             },
             confirmButton = {
-                androidx.compose.material3.TextButton(onClick = {
+                TextButton(onClick = {
                     val u = pendingShredConfirm
                     pendingShredConfirm = null
                     if (u != null) runAdd(u)
                 }) { Text("Encrypt + shred", color = Color(0xFFEF5350)) }
             },
             dismissButton = {
-                androidx.compose.material3.TextButton(onClick = {
-                    pendingShredConfirm = null
-                }) { Text("Cancel") }
+                TextButton(onClick = { pendingShredConfirm = null }) { Text("Cancel") }
             },
         )
     }
@@ -914,6 +1217,25 @@ private fun queryDisplayMetadata(ctx: Context, uri: Uri): Pair<String, String?> 
     }
     return name to mime
 }
+
+private fun queryDisplaySize(ctx: Context, uri: Uri): Long {
+    var size = 0L
+    runCatching {
+        ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
+            val sizeIdx = c.getColumnIndex(OpenableColumns.SIZE)
+            if (c.moveToFirst() && sizeIdx >= 0 && !c.isNull(sizeIdx)) size = c.getLong(sizeIdx)
+        }
+    }
+    return size
+}
+
+/**
+ * §3.3: deposit filenames are attacker-influenced. Clamp the DISPLAYED name to a
+ * sane length so the confirm dialog stays readable and un-spoofable. Display
+ * only — the stored name is the full sanitized value.
+ */
+private fun clampName(name: String): String =
+    if (name.length <= 120) name else name.take(117) + "…"
 
 private fun humanSize(bytes: Long): String = when {
     bytes < 1024 -> "$bytes B"

@@ -1,4 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">vault folder</string>
+    <!-- Store-facing display name (SUITE.md §4.5). Package id stays
+         com.understory.vaultfolder; this is the launcher label + in-app title. -->
+    <string name="app_name">Understory File Vault</string>
+
+    <!-- Generic actions -->
+    <string name="action_close">Close</string>
+    <string name="action_cancel">Cancel</string>
+    <string name="action_back">Back</string>
+
+    <!-- Recovery (§4) -->
+    <string name="recovery_title">Recover your vault</string>
+    <string name="recovery_no_key">No recovery key was saved for this vault. The encrypted files can\'t be opened on this device anymore. Reset to start fresh.</string>
+    <string name="recovery_enter_key">Enter your recovery key to restore access to %1$d folder(s). You\'ll confirm with your device once per folder.</string>
+    <string name="recovery_rebind_action">Restore with recovery key</string>
+    <string name="recovery_reset_action">Reset vault instead</string>
+
+    <!-- Setup recovery escrow (§4.3) -->
+    <string name="setup_recovery_prompt">Save a recovery key now, or accept that losing this device — or re-enrolling your fingerprint — permanently destroys the vault.</string>
+    <string name="setup_recovery_save">Save a recovery key</string>
+    <string name="setup_recovery_skip">Skip — I accept lost device means lost vault</string>
+    <string name="setup_recovery_key_hint">Write this down and store it off this device. It is the only way to recover the vault after a fingerprint re-enrollment. We cannot recover it for you.</string>
+    <string name="setup_recovery_saved_confirm">I saved this key somewhere safe</string>
+
+    <!-- Backup honesty (§4.4) -->
+    <string name="backup_offdevice">To keep an off-device copy, use the recovery key above, or export a file and store the plain copy where you choose.</string>
+
+    <!-- Deposit confirm (§3) -->
+    <string name="deposit_confirm_title">Add this file to the vault?</string>
+    <string name="deposit_confirm_body">%1$s\n%2$s · %3$s\n\nAdding into folder: %4$s. The file is encrypted into the vault under this folder\'s master key.</string>
+    <string name="deposit_confirm_add">Add to vault</string>
+    <string name="deposit_cancelled">Deposit cancelled.</string>
+
+    <!-- Viewer (§5) -->
+    <string name="viewer_action">View</string>
+    <string name="viewer_title">Viewer</string>
+    <string name="viewer_unsupported">Preview not available for this type — export to view externally.</string>
+    <string name="viewer_decoding">Opening…</string>
+    <string name="viewer_failed">Couldn\'t open this file.</string>
+
+    <!-- Integrity hard-fail (§9.5) -->
+    <string name="integrity_failed_title">Integrity check failed</string>
+    <string name="integrity_failed_body">This build won\'t run on this device.</string>
 </resources>

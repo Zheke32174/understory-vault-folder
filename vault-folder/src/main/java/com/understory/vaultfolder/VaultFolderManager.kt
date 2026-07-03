@@ -1,5 +1,8 @@
 package com.understory.vaultfolder
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+
 /**
  * Process-singleton holding the currently-unlocked vault folder, if
  * any. Mirrors the AegisVaultManager pattern: MainActivity unlocks via
@@ -42,6 +45,16 @@ object VaultFolderManager {
         runCatching { unlocked?.lock() }
         unlocked = null
     }
+
+    /**
+     * A deposit URI (ACTION_VIEW) that arrived via onNewIntent while a
+     * MainActivity instance was already alive (§3.4 / A7 warm-task edge). Held
+     * as observable Compose state so the root recomposes and routes it into the
+     * deposit-confirm dialog; process-bound (cleared on lock/close). Without
+     * this a warm-task deposit is silently dropped — only onCreate reads
+     * intent.data.
+     */
+    var pendingDepositUri: android.net.Uri? by androidx.compose.runtime.mutableStateOf(null)
 
     @Volatile private var transientFlightCount = 0
     private val flightLock = Any()
