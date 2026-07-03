@@ -866,8 +866,13 @@ private fun ListScreen(
                 style = MaterialTheme.typography.bodySmall,
                 color = UnderstoryTheme.semantic.warning,
             )
-            OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
-                Text(stringResource(R.string.action_diagnostics))
+            // ENG-ONLY: the in-app Diagnostics debugger is a developer surface;
+            // the shipping (prod) build exposes no diagnostics affordance, matching
+            // the rest of the suite (aegis/passgen gate the identical shared screen).
+            if (com.understory.vaultfolder.BuildConfig.FLAVOR == "eng") {
+                OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.action_diagnostics))
+                }
             }
         }
     }
