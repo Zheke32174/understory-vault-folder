@@ -49,6 +49,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true   // generates BuildConfig.FLAVOR for the eng-only diagnostics gate
     }
 
     packaging {
