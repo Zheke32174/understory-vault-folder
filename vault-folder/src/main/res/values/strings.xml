@@ -42,4 +42,123 @@
     <!-- Integrity hard-fail (§9.5) -->
     <string name="integrity_failed_title">Integrity check failed</string>
     <string name="integrity_failed_body">This build won\'t run on this device.</string>
+
+    <!-- Fatal onCreate crash surface (honest error, not a bare black screen) -->
+    <string name="crash_title">Vault couldn\'t start</string>
+
+    <!-- ===================================================================
+         §9 GUI pass — screen titles, actions, and copy extracted from the
+         old MainActivity/FoldersScreen Kotlin literals. Format args are
+         numbered (%1$s) for future translation.
+         =================================================================== -->
+
+    <!-- Screen titles (TopAppBar, §9.2) -->
+    <string name="title_setup">Set up vault</string>
+    <string name="title_unlock">Unlock</string>
+    <string name="title_list">File vault</string>
+    <string name="title_add">Add file</string>
+    <string name="title_folders">Folders</string>
+
+    <!-- Shared button actions (§9.3) -->
+    <string name="action_continue">Continue</string>
+    <string name="action_add_file">Add file</string>
+    <string name="action_lock">Lock</string>
+    <string name="action_export">Export</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_backup">Backup</string>
+    <string name="action_restore">Restore</string>
+    <string name="action_diagnostics">Diagnostics</string>
+    <string name="action_open">Open</string>
+    <string name="action_unlock">Unlock</string>
+    <string name="action_rename">Rename</string>
+    <string name="action_next">Next</string>
+
+    <!-- Device-auth (biometric) prompt copy -->
+    <string name="auth_bind_title">Bind vault to this device</string>
+    <string name="auth_unlock_title">Unlock vault</string>
+    <string name="auth_unlock_folder_title">Unlock %1$s</string>
+    <string name="auth_folder_subtitle">Required to release this folder\'s master key.</string>
+    <string name="auth_create_folder_title">Create %1$s</string>
+    <string name="auth_create_folder_subtitle">Required to seed this folder\'s master key.</string>
+
+    <!-- Common operation results / errors -->
+    <string name="err_auth_failed">Authentication failed: %1$s</string>
+    <string name="err_auth_cancelled">Authentication cancelled.</string>
+    <string name="err_crypto_init">Crypto init failed: %1$s</string>
+    <string name="err_vault_decrypt">Vault decryption failed.</string>
+
+    <!-- Setup (§4.3 / §9) -->
+    <string name="setup_intro">Vault-folder generates its own 256-bit master key, self-encrypts it under a hardware-backed Keystore key, and self-binds it to this device\'s screen lock. Files you add are individually AES-256-GCM encrypted under that master.</string>
+    <string name="setup_size_cap">Per-file size cap: 20 MiB. Vault-folder is for documents, keys, recovery codes, photos — not video archives.</string>
+    <string name="setup_generate">Self-generate vault</string>
+    <string name="setup_authenticate">Authenticate with your device to bind the vault master key.</string>
+    <string name="setup_continue_no_key">Continue without a recovery key</string>
+    <string name="setup_need_screenlock">Device screen lock required.\n\nVault-folder binds the master key to your device\'s PIN / pattern / biometric. Set up a screen lock in system Settings, then come back.</string>
+    <string name="setup_need_biometric">BiometricPrompt unavailable (status %1$d). Configure a strong biometric or device credential in system Settings.</string>
+    <string name="err_setup_failed">Setup failed: %1$s</string>
+
+    <!-- Unlock -->
+    <string name="unlock_body">Authenticate with your device biometric or PIN.</string>
+    <string name="unlock_action">Unlock with device auth</string>
+    <string name="unlock_working">Authenticating…</string>
+
+    <!-- File list (§9) -->
+    <string name="list_file_count">%1$d file(s)</string>
+    <string name="list_folder_default">Folder: Default · switch / create</string>
+    <string name="list_folder_named">Folder: %1$s… · switch / create</string>
+    <string name="list_exporting">Exporting…</string>
+    <string name="list_export_done">Exported %1$s</string>
+    <string name="list_export_failed">Export failed: %1$s</string>
+    <string name="list_export_unavailable">Nothing to export — file no longer available</string>
+    <string name="list_empty">No files yet. Tap Add file to import one.</string>
+    <string name="entry_meta">%1$s · %2$s</string>
+
+    <!-- File delete (keeps the exemplary A9 confirm dialog) -->
+    <string name="delete_file_title">Delete this file?</string>
+    <string name="delete_file_body">Deleting permanently removes the encrypted blob from this vault. There is no recycle bin and no recovery path. Export first if you might want it back.</string>
+    <string name="delete_file_done">Deleted %1$s</string>
+    <string name="delete_file_failed">Delete failed: %1$s</string>
+
+    <!-- Add file (§3 / §9) -->
+    <string name="add_intro">Pick a file via the system file picker. It\'s encrypted in-place under this vault\'s master key. Per-file cap: 20 MiB.</string>
+    <string name="add_pick">Pick a file</string>
+    <string name="add_working">Encrypting…</string>
+    <string name="add_shred_label">Delete source after import</string>
+    <string name="add_shred_on">On — you\'ll confirm before each shred. Only works on URIs with WRITE permission (system file picker, not bare Open-with deposits).</string>
+    <string name="add_shred_off">Off — the source file stays where it is.</string>
+    <string name="add_done">Added %1$s (%2$s)</string>
+    <string name="add_done_shredded">Added %1$s · source shredded</string>
+    <string name="add_done_shred_failed">Added %1$s · shred failed: %2$s (your encrypted copy is safe; delete the source manually)</string>
+    <string name="add_failed">Add failed: %1$s</string>
+    <string name="shred_title">Shred source after import?</string>
+    <string name="shred_body">After encrypting this file into the vault, attempt to permanently delete the source file from where you picked it. This cannot be undone if it succeeds. If the source URI doesn\'t grant write access, the delete will fail and the source will remain — your encrypted copy is safe either way.</string>
+    <string name="shred_confirm">Encrypt + shred</string>
+
+    <!-- Recovery-backup export gate (Stage.Export) -->
+    <string name="export_gate_title">Export recovery backup</string>
+    <string name="export_gate_no_key">No recovery key was enrolled for this vault, so there is no recovery-encrypted backup to make. Use the per-file Export action in the list to save an individual file instead.</string>
+    <string name="export_gate_body">Enter your recovery key. The backup is encrypted so only this key can open it.</string>
+    <string name="export_gate_state_unavailable">Recovery state unavailable.</string>
+
+    <!-- Folders (§6 / §9) -->
+    <string name="folders_intro">Each folder has its own master key, biometric-released. Switching folders prompts for biometric again. The Default folder is the one created at first setup.</string>
+    <string name="folders_create">Create folder</string>
+    <string name="folder_default_name">Default</string>
+    <string name="folder_default_desc">Default folder · created at setup</string>
+    <string name="folder_created_desc">Created %1$s</string>
+    <string name="folder_unlocked_tag">· unlocked</string>
+    <string name="cd_rename">Rename %1$s</string>
+    <string name="err_decrypt_failed">Decrypt failed: %1$s</string>
+    <string name="folder_delete_title">Delete folder?</string>
+    <string name="folder_delete_body">Deletes the folder \"%1$s\" and ALL files in it. No recycle bin, no recovery.</string>
+    <string name="folder_delete_done">Deleted %1$s.</string>
+    <string name="folder_delete_failed">Delete failed.</string>
+    <string name="folder_rename_title">Rename folder</string>
+    <string name="folder_name_label">Folder name</string>
+    <string name="folder_rename_done">Renamed to %1$s.</string>
+    <string name="folder_rename_failed">Rename failed.</string>
+    <string name="folder_create_intro">Pick a name. Each folder is independently encrypted; you\'ll authenticate again after picking a name to seed the new folder\'s master key.</string>
+    <string name="folder_create_auth_title">Authenticate</string>
+    <string name="folder_create_auth_body">Authenticate to seed the new folder\'s master key.</string>
+    <string name="err_create_failed">Create failed: %1$s</string>
 </resources>

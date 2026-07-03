@@ -8,13 +8,11 @@ import android.os.Bundle
 import android.os.Debug
 import android.provider.OpenableColumns
 import android.view.WindowManager
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.biometric.BiometricManager
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,22 +21,22 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -69,7 +67,6 @@ import com.understory.security.DiagnosticsScreen
 import com.understory.security.KeepAliveBackHandler
 import com.understory.security.RecoveryCopy
 import com.understory.security.SecureOutlinedButton
-import com.understory.security.SuiteStatusFooter
 import com.understory.security.Tamper
 import com.understory.security.TestingMode
 import com.understory.security.TransientFlight
@@ -78,6 +75,8 @@ import com.understory.security.VaultImportScreen
 import com.understory.security.VaultRecovery
 import com.understory.security.VaultRecoveryScreen
 import com.understory.security.ui.Bg
+import com.understory.security.ui.components.SuiteScaffold
+import com.understory.security.ui.components.SwitchRow
 import com.understory.security.ui.theme.UnderstoryAccent
 import com.understory.security.ui.theme.UnderstoryTheme
 import kotlinx.coroutines.launch
@@ -101,9 +100,13 @@ class MainActivity : FragmentActivity() {
         } catch (t: Throwable) {
             Diagnostics.error("vault-folder.MainActivity", "onCreate threw: ${t.javaClass.simpleName}: ${t.message}")
             setContent {
+                // Deliberately raw (no UnderstoryTheme / M3 tokens): this is the
+                // last-resort surface shown when initialize() itself threw, so it
+                // must render even if the theme is what failed. Only the title is
+                // a resource; the body is the raw exception text.
                 Surface(modifier = Modifier.fillMaxSize(), color = Color.Black) {
                     Column(modifier = Modifier.padding(20.dp)) {
-                        Text("vault-folder crash", color = Color(0xFFEF5350), fontSize = 18.sp)
+                        Text(stringResource(R.string.crash_title), color = Color(0xFFEF5350), fontSize = 18.sp)
                         Text(t.toString(), color = Color(0xFFE0E0E0), fontSize = 11.sp)
                     }
                 }
@@ -179,13 +182,29 @@ class MainActivity : FragmentActivity() {
         setContent {
             UnderstoryTheme(accent = UnderstoryAccent.VAULTFOLDER) {
                 Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                    VaultFolderRoot(
-                        activity = this,
-                        unlockedRef = ::unlocked,
-                        setUnlocked = { unlocked = it },
-                        onClose = { finishAndRemoveTask() },
-                        depositUri = depositUri,
-                    )
+                    // §9.2: one suite-wide SnackbarHost hosted above the stage
+                    // switch so an operation result (e.g. "Added file") survives
+                    // the screen navigating back to the list after it completes.
+                    val snackbarHostState = remember { SnackbarHostState() }
+                    val snackScope = rememberCoroutineScope()
+                    Box(modifier = Modifier.fillMaxSize()) {
+                        VaultFolderRoot(
+                            activity = this@MainActivity,
+                            unlockedRef = ::unlocked,
+                            setUnlocked = { unlocked = it },
+                            onClose = { finishAndRemoveTask() },
+                            depositUri = depositUri,
+                            showMessage = { msg ->
+                                snackScope.launch { snackbarHostState.showSnackbar(msg) }
+                            },
+                        )
+                        SnackbarHost(
+                            hostState = snackbarHostState,
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .navigationBarsPadding(),
+                        )
+                    }
                 }
             }
         }
@@ -271,6 +290,7 @@ private fun VaultFolderRoot(
     unlockedRef: () -> VaultFolderStore?,
     setUnlocked: (VaultFolderStore?) -> Unit,
     onClose: () -> Unit,
+    showMessage: (String) -> Unit,
     depositUri: Uri? = null,
 ) {
     val ctx = LocalContext.current
@@ -369,6 +389,7 @@ private fun VaultFolderRoot(
                 onExportBackup = { setStage(Stage.Export) },
                 onImportBackup = { setStage(Stage.Import) },
                 onView = { entry -> viewerEntryId = entry.id; setStage(Stage.Viewer) },
+                showMessage = showMessage,
             )
         }
         Stage.Viewer -> {
@@ -421,6 +442,7 @@ private fun VaultFolderRoot(
             FoldersScreen(
                 activity = activity,
                 currentFolderId = v.folderId,
+                showMessage = showMessage,
                 onOpenFolder = { newStore ->
                     if (newStore.folderId != v.folderId) {
                         v.lock()
@@ -445,6 +467,7 @@ private fun VaultFolderRoot(
                 onSaved = backToList,
                 onCancel = backToList,
                 incomingUri = incoming,
+                showMessage = showMessage,
             )
         }
         Stage.Diagnostics -> {
@@ -477,12 +500,10 @@ private fun ExportKeyGate(onKey: (CharArray) -> Unit, onBack: () -> Unit) {
         modifier = Modifier.fillMaxSize().padding(20.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Text("Export recovery backup", style = MaterialTheme.typography.titleLarge)
+        Text(stringResource(R.string.export_gate_title), style = MaterialTheme.typography.titleLarge)
         if (!enrolled) {
             Text(
-                "No recovery key was enrolled for this vault, so there is no " +
-                    "recovery-encrypted backup to make. Use the per-file Export " +
-                    "action in the list to save an individual file instead.",
+                stringResource(R.string.export_gate_no_key),
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -492,8 +513,7 @@ private fun ExportKeyGate(onKey: (CharArray) -> Unit, onBack: () -> Unit) {
             return@Column
         }
         Text(
-            "Enter your recovery key. The backup is encrypted so only this key can " +
-                "open it.",
+            stringResource(R.string.export_gate_body),
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -507,7 +527,7 @@ private fun ExportKeyGate(onKey: (CharArray) -> Unit, onBack: () -> Unit) {
         Button(
             onClick = {
                 val state = RecoveryStateStore.load(ctx)
-                if (state == null) { error = "Recovery state unavailable."; return@Button }
+                if (state == null) { error = ctx.getString(R.string.export_gate_state_unavailable); return@Button }
                 val entered = VaultRecovery.recoveryKeyFrom(field.toCharArray())
                 val ok = VaultRecovery.verifyRecoveryKey(entered, state.verifier, state.verifierSalt)
                 if (!ok) {
@@ -519,7 +539,7 @@ private fun ExportKeyGate(onKey: (CharArray) -> Unit, onBack: () -> Unit) {
             },
             enabled = field.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
-        ) { Text("Continue") }
+        ) { Text(stringResource(R.string.action_continue)) }
         OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) {
             Text(stringResource(R.string.action_back))
         }
@@ -529,9 +549,7 @@ private fun ExportKeyGate(onKey: (CharArray) -> Unit, onBack: () -> Unit) {
 private fun deviceUnsupportedReason(ctx: Context): String? {
     val km = ctx.getSystemService(android.app.KeyguardManager::class.java)
     if (km == null || !km.isDeviceSecure) {
-        return "Device screen lock required.\n\nVault-folder binds the master key " +
-            "to your device's PIN / pattern / biometric. Set up a screen lock in " +
-            "system Settings, then come back."
+        return ctx.getString(R.string.setup_need_screenlock)
     }
     val bm = BiometricManager.from(ctx)
     val canAuth = bm.canAuthenticate(
@@ -539,8 +557,7 @@ private fun deviceUnsupportedReason(ctx: Context): String? {
             BiometricManager.Authenticators.DEVICE_CREDENTIAL,
     )
     if (canAuth != BiometricManager.BIOMETRIC_SUCCESS) {
-        return "BiometricPrompt unavailable (status $canAuth). Configure a strong " +
-            "biometric or device credential in system Settings."
+        return ctx.getString(R.string.setup_need_biometric, canAuth)
     }
     return null
 }
@@ -565,126 +582,181 @@ private fun SetupScreen(
     var savedConfirmed by remember { mutableStateOf(false) }
     DisposableEffect(Unit) { onDispose { recoveryKey.wipe() } }
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("first-time setup", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-        if (deviceIssue != null) {
-            Box(modifier = Modifier.fillMaxWidth()
-                .background(Color(0xFF3D2A00), RoundedCornerShape(6.dp))
-                .padding(12.dp)) {
-                Text(deviceIssue, color = Color(0xFFFFB74D), fontSize = 12.sp)
-            }
-            OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Close") }
-            return@Column
-        }
-        when (step) {
-            0 -> {
-                Text(
-                    "Vault-folder generates its own 256-bit master key, self-encrypts " +
-                        "it under a hardware-backed Keystore key, and self-binds it to this " +
-                        "device's screen lock. Files you add are individually AES-256-GCM " +
-                        "encrypted under that master.",
-                    color = Color(0xFF9E9E9E), fontSize = 12.sp,
-                )
-                Box(modifier = Modifier.fillMaxWidth()
-                    .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
-                    .padding(12.dp)) {
+    SuiteScaffold(
+        title = stringResource(R.string.title_setup),
+        showSuiteFooter = false,
+    ) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .verticalScroll(rememberScrollState())
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.md),
+        ) {
+            if (deviceIssue != null) {
+                Surface(
+                    color = UnderstoryTheme.semantic.warningContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     Text(
-                        "Per-file size cap: 20 MiB. Vault-folder is for documents, keys, " +
-                            "recovery codes, photos — not video archives.\n\n" +
-                            stringResource(R.string.setup_recovery_prompt),
-                        color = Color(0xFFFFB74D), fontSize = 11.sp,
+                        deviceIssue,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = UnderstoryTheme.semantic.warning,
+                        modifier = Modifier.padding(UnderstoryTheme.spacing.md),
                     )
                 }
-                // §4.4 backup honesty — no false "#7 backups" claim.
-                Text(
-                    stringResource(R.string.backup_offdevice),
-                    color = Color(0xFF9E9E9E), fontSize = 11.sp,
-                )
-                Button(onClick = { step = 1 }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Self-generate vault")
+                OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.action_close))
                 }
-                OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
+                return@Column
             }
-            1 -> {
-                // §4.3: recovery-key enrollment choice BEFORE binding.
-                Text(RecoveryCopy.RECOVERY_KEY_TITLE, color = Color(0xFFE0E0E0), fontSize = 18.sp)
-                Text(RecoveryCopy.RECOVERY_KEY_BODY, color = Color(0xFF9E9E9E), fontSize = 12.sp)
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text("Save a recovery key", color = Color(0xFFE0E0E0),
-                        fontSize = 13.sp, modifier = Modifier.weight(1f))
-                    Switch(checked = enrollRecovery, onCheckedChange = { enrollRecovery = it })
-                }
-                if (enrollRecovery) {
-                    Box(modifier = Modifier.fillMaxWidth()
-                        .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
-                        .padding(12.dp)) {
+            when (step) {
+                0 -> {
+                    Text(
+                        stringResource(R.string.setup_intro),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Surface(
+                        color = UnderstoryTheme.semantic.warningContainer,
+                        shape = MaterialTheme.shapes.small,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
                         Text(
-                            com.understory.security.RecoveryKeyCodec.grouped(recoveryKey.chars),
-                            color = Color(0xFFE0E0E0), fontSize = 15.sp,
+                            stringResource(R.string.setup_size_cap) + "\n\n" +
+                                stringResource(R.string.setup_recovery_prompt),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = UnderstoryTheme.semantic.warning,
+                            modifier = Modifier.padding(UnderstoryTheme.spacing.md),
                         )
                     }
-                    Text(stringResource(R.string.setup_recovery_key_hint),
-                        color = Color(0xFF9E9E9E), fontSize = 11.sp)
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Checkbox(checked = savedConfirmed, onCheckedChange = { savedConfirmed = it })
-                        Text(stringResource(R.string.setup_recovery_saved_confirm),
-                            color = Color(0xFFE0E0E0), fontSize = 12.sp)
+                    // §4.4 backup honesty — no false "#7 backups" claim.
+                    Text(
+                        stringResource(R.string.backup_offdevice),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(onClick = { step = 1 }, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.setup_generate))
+                    }
+                    OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.action_cancel))
                     }
                 }
-                error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
-                Button(
-                    onClick = { step = 2 },
-                    enabled = !enrollRecovery || savedConfirmed,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(if (enrollRecovery) "Continue" else "Continue without a recovery key") }
-                OutlinedButton(onClick = { step = 0 }, modifier = Modifier.fillMaxWidth()) { Text("Back") }
-            }
-            2 -> {
-                Text("Authenticate with your device to bind the vault master key.",
-                    color = Color(0xFF9E9E9E), fontSize = 12.sp)
-                error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
-                LaunchedEffect(Unit) {
-                    runCatching {
-                        val cipher = Crypto.deviceAuthCipherForEncrypt()
-                        promptDeviceAuth(activity, "Bind vault-folder to this device",
-                            "vault-folder", cipher,
-                            onSuccess = { authed ->
-                                scope.launch {
-                                    val outcome = runCatching {
-                                        withContext(Bg.io) {
-                                            val keyChars = if (enrollRecovery) recoveryKey.chars else null
-                                            val v = VaultFolder.create(ctx, authed, recoveryKeyChars = keyChars)
-                                            if (enrollRecovery) {
-                                                // Persist the recovery verifier so a later
-                                                // recovery / import can check the key.
-                                                RecoveryStateStore.save(
-                                                    ctx,
-                                                    VaultRecovery.enroll(recoveryKey, itemCount = 0),
-                                                )
-                                            }
-                                            v
-                                        }
-                                    }
-                                    outcome.fold(
-                                        onSuccess = { v ->
-                                            if (activity.lifecycle.currentState
-                                                    .isAtLeast(Lifecycle.State.STARTED)
-                                            ) onCreated(v) else v.lock()
-                                        },
-                                        onFailure = { error = "Setup failed: ${it.message}" },
-                                    )
-                                }
-                            },
-                            onError = { msg -> error = "Authentication failed: $msg" },
-                            onCancel = { error = "Authentication cancelled."; step = 1 },
+                1 -> {
+                    // §4.3: recovery-key enrollment choice BEFORE binding.
+                    Text(
+                        RecoveryCopy.RECOVERY_KEY_TITLE,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Text(
+                        RecoveryCopy.RECOVERY_KEY_BODY,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    // §3 a11y: shared SwitchRow → merged Role.Switch TalkBack
+                    // semantics instead of a bare Switch beside a label.
+                    SwitchRow(
+                        label = stringResource(R.string.setup_recovery_save),
+                        checked = enrollRecovery,
+                        onCheckedChange = { enrollRecovery = it },
+                    )
+                    if (enrollRecovery) {
+                        Surface(
+                            color = MaterialTheme.colorScheme.surfaceVariant,
+                            shape = MaterialTheme.shapes.small,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                com.understory.security.RecoveryKeyCodec.grouped(recoveryKey.chars),
+                                style = MaterialTheme.typography.bodyLarge,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(UnderstoryTheme.spacing.md),
+                            )
+                        }
+                        Text(
+                            stringResource(R.string.setup_recovery_key_hint),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                    }.onFailure { error = "Crypto init failed: ${it.message}" }
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(checked = savedConfirmed, onCheckedChange = { savedConfirmed = it })
+                            Text(
+                                stringResource(R.string.setup_recovery_saved_confirm),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                            )
+                        }
+                    }
+                    error?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    Button(
+                        onClick = { step = 2 },
+                        enabled = !enrollRecovery || savedConfirmed,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            if (enrollRecovery) stringResource(R.string.action_continue)
+                            else stringResource(R.string.setup_continue_no_key)
+                        )
+                    }
+                    OutlinedButton(onClick = { step = 0 }, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.action_back))
+                    }
+                }
+                2 -> {
+                    Text(
+                        stringResource(R.string.setup_authenticate),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    error?.let {
+                        Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+                    }
+                    LaunchedEffect(Unit) {
+                        runCatching {
+                            val cipher = Crypto.deviceAuthCipherForEncrypt()
+                            promptDeviceAuth(
+                                activity,
+                                ctx.getString(R.string.auth_bind_title),
+                                ctx.getString(R.string.app_name),
+                                cipher,
+                                onSuccess = { authed ->
+                                    scope.launch {
+                                        val outcome = runCatching {
+                                            withContext(Bg.io) {
+                                                val keyChars = if (enrollRecovery) recoveryKey.chars else null
+                                                val v = VaultFolder.create(ctx, authed, recoveryKeyChars = keyChars)
+                                                if (enrollRecovery) {
+                                                    // Persist the recovery verifier so a later
+                                                    // recovery / import can check the key.
+                                                    RecoveryStateStore.save(
+                                                        ctx,
+                                                        VaultRecovery.enroll(recoveryKey, itemCount = 0),
+                                                    )
+                                                }
+                                                v
+                                            }
+                                        }
+                                        outcome.fold(
+                                            onSuccess = { v ->
+                                                if (activity.lifecycle.currentState
+                                                        .isAtLeast(Lifecycle.State.STARTED)
+                                                ) onCreated(v) else v.lock()
+                                            },
+                                            onFailure = { error = ctx.getString(R.string.err_setup_failed, it.message) },
+                                        )
+                                    }
+                                },
+                                onError = { msg -> error = ctx.getString(R.string.err_auth_failed, msg) },
+                                onCancel = { error = ctx.getString(R.string.err_auth_cancelled); step = 1 },
+                            )
+                        }.onFailure { error = ctx.getString(R.string.err_crypto_init, it.message) }
+                    }
                 }
             }
         }
@@ -702,55 +774,74 @@ private fun UnlockScreen(
     var error by remember { mutableStateOf<String?>(null) }
     var working by remember { mutableStateOf(false) }
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
-    ) {
-        Text("unlock", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-        Text("Authenticate with your device biometric or PIN.",
-            color = Color(0xFF9E9E9E), fontSize = 13.sp)
-        error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
-
-        Button(
-            onClick = {
-                if (working) return@Button
-                working = true; error = null
-                runCatching {
-                    val iv = VaultFolder.ivForUnlock(ctx)
-                    val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
-                    promptDeviceAuth(activity, "Unlock vault-folder", "vault-folder", cipher,
-                        onSuccess = { authed ->
-                            runCatching {
-                                val v = VaultFolder.unlock(ctx, authed)
-                                if (activity.lifecycle.currentState
-                                        .isAtLeast(Lifecycle.State.STARTED)
-                                ) onUnlocked(v) else { v.lock(); working = false }
-                            }.onFailure {
-                                working = false
-                                // §4: distinguish a permanent key invalidation
-                                // (route to recovery) from a transient failure.
-                                if (VaultRecovery.classifyUnlockFailure(it) ==
-                                    VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
-                                ) onInvalidated()
-                                else error = "Vault decryption failed."
-                            }
-                        },
-                        onError = { msg -> error = "Authentication failed: $msg"; working = false },
-                        onCancel = { error = "Authentication cancelled."; working = false },
-                    )
-                }.onFailure {
-                    working = false
-                    if (VaultRecovery.classifyUnlockFailure(it) ==
-                        VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
-                    ) onInvalidated()
-                    else error = "Crypto init failed: ${it.message}"
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
+    SuiteScaffold(
+        title = stringResource(R.string.title_unlock),
+        showSuiteFooter = false,
+    ) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .verticalScroll(rememberScrollState())
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.md),
         ) {
-            Text(if (working) "Authenticating…" else "Unlock with device auth")
+            Text(
+                stringResource(R.string.unlock_body),
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            error?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
+            }
+
+            Button(
+                onClick = {
+                    if (working) return@Button
+                    working = true; error = null
+                    runCatching {
+                        val iv = VaultFolder.ivForUnlock(ctx)
+                        val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
+                        promptDeviceAuth(activity, ctx.getString(R.string.auth_unlock_title),
+                            ctx.getString(R.string.app_name), cipher,
+                            onSuccess = { authed ->
+                                runCatching {
+                                    val v = VaultFolder.unlock(ctx, authed)
+                                    if (activity.lifecycle.currentState
+                                            .isAtLeast(Lifecycle.State.STARTED)
+                                    ) onUnlocked(v) else { v.lock(); working = false }
+                                }.onFailure {
+                                    working = false
+                                    // §4: distinguish a permanent key invalidation
+                                    // (route to recovery) from a transient failure.
+                                    if (VaultRecovery.classifyUnlockFailure(it) ==
+                                        VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                                    ) onInvalidated()
+                                    else error = ctx.getString(R.string.err_vault_decrypt)
+                                }
+                            },
+                            onError = { msg -> error = ctx.getString(R.string.err_auth_failed, msg); working = false },
+                            onCancel = { error = ctx.getString(R.string.err_auth_cancelled); working = false },
+                        )
+                    }.onFailure {
+                        working = false
+                        if (VaultRecovery.classifyUnlockFailure(it) ==
+                            VaultRecovery.VaultKeyState.PERMANENTLY_INVALIDATED
+                        ) onInvalidated()
+                        else error = ctx.getString(R.string.err_crypto_init, it.message)
+                    }
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (working) stringResource(R.string.unlock_working)
+                    else stringResource(R.string.unlock_action)
+                )
+            }
+            OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.action_close))
+            }
         }
-        OutlinedButton(onClick = onClose, modifier = Modifier.fillMaxWidth()) { Text("Close") }
     }
 }
 
@@ -772,6 +863,7 @@ private fun ListScreen(
     onExportBackup: () -> Unit,
     onImportBackup: () -> Unit,
     onView: (VaultFolderEntry) -> Unit,
+    showMessage: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -794,7 +886,7 @@ private fun ListScreen(
         pendingExportId = null
         if (uri == null) return@rememberLauncherForActivityResult
         if (target == null) {
-            Toast.makeText(ctx, "Nothing to export — file no longer available", Toast.LENGTH_SHORT).show()
+            showMessage(ctx.getString(R.string.list_export_unavailable))
             return@rememberLauncherForActivityResult
         }
         // §2: run decrypt+write off the main thread; surface a real state.
@@ -804,110 +896,121 @@ private fun ListScreen(
             exportState = outcome.fold(
                 onSuccess = {
                     Diagnostics.log("vault-folder.List", "exported ${target.name} ok")
-                    OpState.Done("Exported ${target.name}")
+                    OpState.Done(ctx.getString(R.string.list_export_done, target.name))
                 },
                 onFailure = {
                     Diagnostics.error("vault-folder.List",
                         "export failed: ${it.javaClass.simpleName}: ${it.message}")
-                    OpState.Failed("Export failed: ${it.message}")
+                    OpState.Failed(ctx.getString(R.string.list_export_failed, it.message))
                 },
             )
         }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("file vault", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-                Text(
-                    "${store.contents.entries.size} file(s)",
-                    color = Color(0xFF9E9E9E), fontSize = 12.sp,
-                )
-            }
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(onClick = onAdd, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Add file") }
-            OutlinedButton(onClick = onLock, modifier = Modifier.weight(1f).fillMaxWidth()) { Text("Lock") }
-        }
-        OutlinedButton(onClick = onFolders, modifier = Modifier.fillMaxWidth()) {
-            val label = if (store.folderId == VaultFolder.DEFAULT_FOLDER_ID)
-                "Folder: Default · switch / create"
-            else "Folder: ${store.folderId.take(8)}… · switch / create"
-            Text(label)
-        }
-
-        @Suppress("UNUSED_EXPRESSION") revision
-
-        when (val s = exportState) {
-            is OpState.Working -> {
-                Text("Exporting…", color = Color(0xFFFFB74D), fontSize = 12.sp)
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-            }
-            is OpState.Done -> {
-                Text(s.msg, color = Color(0xFF81C784), fontSize = 12.sp)
-                LaunchedEffect(s) { Toast.makeText(ctx, s.msg, Toast.LENGTH_SHORT).show(); exportState = OpState.Idle }
-            }
-            is OpState.Failed -> {
-                Text(s.msg, color = Color(0xFFEF5350), fontSize = 12.sp)
-                LaunchedEffect(s) { Toast.makeText(ctx, s.msg, Toast.LENGTH_LONG).show(); exportState = OpState.Idle }
-            }
-            OpState.Idle -> {}
-        }
-
-        if (store.contents.entries.isEmpty()) {
-            Spacer(Modifier.height(20.dp))
-            Text("No files yet. Tap Add file to import one.",
-                color = Color(0xFF9E9E9E), fontSize = 13.sp)
-            Spacer(Modifier.weight(1f))
-        } else {
-            LazyColumn(
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                modifier = Modifier.fillMaxWidth().weight(1f),
+    SuiteScaffold(title = stringResource(R.string.title_list)) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
+        ) {
+            Text(
+                stringResource(R.string.list_file_count, store.contents.entries.size),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
             ) {
-                items(store.contents.entries, key = { it.id }) { entry ->
-                    EntryRow(
-                        entry = entry,
-                        canView = ViewerSupport.isSupported(entry.mimeType),
-                        busy = exportState is OpState.Working,
-                        onView = { onView(entry) },
-                        onExport = {
-                            Diagnostics.log("vault-folder.List", "export tap: ${entry.name}")
-                            pendingExportId = entry.id
-                            VaultFolderManager.beginTransientFlight()
-                            runCatching { exportLauncher.launch(entry.name) }
-                                .onFailure {
-                                    Diagnostics.error("vault-folder.List",
-                                        "exportLauncher.launch threw: ${it.javaClass.simpleName}: ${it.message}")
-                                    VaultFolderManager.endTransientFlight()
-                                    pendingExportId = null
-                                }
-                        },
-                        onDelete = { deleteCandidate = entry },
-                    )
+                Button(onClick = onAdd, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    Text(stringResource(R.string.action_add_file))
+                }
+                OutlinedButton(onClick = onLock, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                    Text(stringResource(R.string.action_lock))
                 }
             }
-        }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            OutlinedButton(onClick = onExportBackup, modifier = Modifier.weight(1f)) {
-                Text("Backup")
+            OutlinedButton(onClick = onFolders, modifier = Modifier.fillMaxWidth()) {
+                val label = if (store.folderId == VaultFolder.DEFAULT_FOLDER_ID)
+                    stringResource(R.string.list_folder_default)
+                else stringResource(R.string.list_folder_named, store.folderId.take(8))
+                Text(label)
             }
-            OutlinedButton(onClick = onImportBackup, modifier = Modifier.weight(1f)) {
-                Text("Restore")
+
+            @Suppress("UNUSED_EXPRESSION") revision
+
+            when (val s = exportState) {
+                is OpState.Working -> {
+                    Text(
+                        stringResource(R.string.list_exporting),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = UnderstoryTheme.semantic.warning,
+                    )
+                    LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                is OpState.Done -> LaunchedEffect(s) { showMessage(s.msg); exportState = OpState.Idle }
+                is OpState.Failed -> LaunchedEffect(s) { showMessage(s.msg); exportState = OpState.Idle }
+                OpState.Idle -> {}
+            }
+
+            if (store.contents.entries.isEmpty()) {
+                Spacer(Modifier.height(UnderstoryTheme.spacing.lg))
+                Text(
+                    stringResource(R.string.list_empty),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.weight(1f))
+            } else {
+                LazyColumn(
+                    verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.xs),
+                    modifier = Modifier.fillMaxWidth().weight(1f),
+                ) {
+                    items(store.contents.entries, key = { it.id }) { entry ->
+                        EntryRow(
+                            entry = entry,
+                            canView = ViewerSupport.isSupported(entry.mimeType),
+                            busy = exportState is OpState.Working,
+                            onView = { onView(entry) },
+                            onExport = {
+                                Diagnostics.log("vault-folder.List", "export tap: ${entry.name}")
+                                pendingExportId = entry.id
+                                VaultFolderManager.beginTransientFlight()
+                                runCatching { exportLauncher.launch(entry.name) }
+                                    .onFailure {
+                                        Diagnostics.error("vault-folder.List",
+                                            "exportLauncher.launch threw: ${it.javaClass.simpleName}: ${it.message}")
+                                        VaultFolderManager.endTransientFlight()
+                                        pendingExportId = null
+                                    }
+                            },
+                            onDelete = { deleteCandidate = entry },
+                        )
+                    }
+                }
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
+            ) {
+                OutlinedButton(onClick = onExportBackup, modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.action_backup))
+                }
+                OutlinedButton(onClick = onImportBackup, modifier = Modifier.weight(1f)) {
+                    Text(stringResource(R.string.action_restore))
+                }
+            }
+            OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.action_diagnostics))
             }
         }
-        OutlinedButton(onClick = onDiagnostics, modifier = Modifier.fillMaxWidth()) {
-            Text("Diagnostics")
-        }
-        SuiteStatusFooter()
     }
 
     deleteCandidate?.let { entry ->
         AlertDialog(
             onDismissRequest = { deleteCandidate = null },
-            title = { Text("Delete this file?") },
+            title = { Text(stringResource(R.string.delete_file_title)) },
             text = {
                 val dialogView = LocalView.current
                 DisposableEffect(dialogView) {
@@ -915,13 +1018,16 @@ private fun ListScreen(
                     onDispose { }
                 }
                 Column {
-                    Text(entry.name, color = Color(0xFFE0E0E0), fontSize = 14.sp)
-                    Spacer(Modifier.height(10.dp))
                     Text(
-                        "Deleting permanently removes the encrypted blob from this " +
-                            "vault. There is no recycle bin and no recovery path. " +
-                            "Export first if you might want it back.",
-                        color = Color(0xFFFFB74D), fontSize = 12.sp,
+                        entry.name,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurface,
+                    )
+                    Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
+                    Text(
+                        stringResource(R.string.delete_file_body),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = UnderstoryTheme.semantic.warning,
                     )
                 }
             },
@@ -936,17 +1042,21 @@ private fun ListScreen(
                         outcome.fold(
                             onSuccess = {
                                 revision++
-                                Toast.makeText(ctx, "Deleted ${target.name}", Toast.LENGTH_SHORT).show()
+                                showMessage(ctx.getString(R.string.delete_file_done, target.name))
                             },
                             onFailure = {
-                                Toast.makeText(ctx, "Delete failed: ${it.message}", Toast.LENGTH_LONG).show()
+                                showMessage(ctx.getString(R.string.delete_file_failed, it.message))
                             },
                         )
                     }
-                }) { Text("Delete", color = Color(0xFFEF5350)) }
+                }) {
+                    Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
-                TextButton(onClick = { deleteCandidate = null }) { Text("Cancel") }
+                TextButton(onClick = { deleteCandidate = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
             },
         )
     }
@@ -961,29 +1071,34 @@ private fun EntryRow(
     onExport: () -> Unit,
     onDelete: () -> Unit,
 ) {
-    Box(
-        modifier = Modifier.fillMaxWidth()
-            .background(Color(0xFF1C1C1C), RoundedCornerShape(8.dp))
-            .padding(12.dp),
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceVariant,
+        shape = MaterialTheme.shapes.medium,
+        modifier = Modifier.fillMaxWidth(),
     ) {
-        Column {
-            Text(entry.name, color = Color(0xFFE0E0E0), fontSize = 14.sp)
+        Column(modifier = Modifier.padding(UnderstoryTheme.spacing.md)) {
             Text(
-                "${entry.mimeType} · ${humanSize(entry.sizeBytes)}",
-                color = Color(0xFF9E9E9E), fontSize = 11.sp,
+                entry.name,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurface,
             )
-            Spacer(Modifier.height(6.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(
+                stringResource(R.string.entry_meta, entry.mimeType, humanSize(entry.sizeBytes)),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Spacer(Modifier.height(UnderstoryTheme.spacing.xs))
+            Row(horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
                 if (canView) {
                     OutlinedButton(onClick = onView, enabled = !busy, modifier = Modifier.weight(1f)) {
                         Text(stringResource(R.string.viewer_action))
                     }
                 }
                 OutlinedButton(onClick = onExport, enabled = !busy, modifier = Modifier.weight(1f)) {
-                    Text("Export")
+                    Text(stringResource(R.string.action_export))
                 }
                 SecureOutlinedButton(onClick = onDelete, enabled = !busy, modifier = Modifier.weight(1f)) {
-                    Text("Delete")
+                    Text(stringResource(R.string.action_delete))
                 }
             }
         }
@@ -996,10 +1111,10 @@ private fun AddScreen(
     onSaved: () -> Unit,
     onCancel: () -> Unit,
     incomingUri: Uri? = null,
+    showMessage: (String) -> Unit,
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
-    var status by remember { mutableStateOf<String?>(null) }
     var opState by remember { mutableStateOf<OpState>(OpState.Idle) }
     val working = opState is OpState.Working
     var shredSource by rememberSaveable { mutableStateOf(false) }
@@ -1010,7 +1125,6 @@ private fun AddScreen(
 
     fun runAdd(uri: Uri) {
         opState = OpState.Working
-        status = null
         val opts = if (shredSource) IngestOptions.SHRED_SOURCE else IngestOptions.READ_ONLY
         scope.launch {
             val outcome = withContext(Bg.io) {
@@ -1026,23 +1140,21 @@ private fun AddScreen(
                             "shred=${result.javaClass.simpleName}")
                     val msg = when (result) {
                         is AddResult.Added ->
-                            "Added ${result.entry.name} (${humanSize(result.entry.sizeBytes)})"
+                            ctx.getString(R.string.add_done, result.entry.name, humanSize(result.entry.sizeBytes))
                         is AddResult.AddedSourceShredded ->
-                            "Added ${result.entry.name} · source shredded"
+                            ctx.getString(R.string.add_done_shredded, result.entry.name)
                         is AddResult.AddedSourceShredFailed ->
-                            "Added ${result.entry.name} · shred failed: ${result.reason} " +
-                                "(your encrypted copy is safe; delete the source manually)"
+                            ctx.getString(R.string.add_done_shred_failed, result.entry.name, result.reason)
                     }
-                    status = msg
                     opState = OpState.Idle
-                    Toast.makeText(ctx, msg, Toast.LENGTH_LONG).show()
+                    showMessage(msg)
                     if (result !is AddResult.AddedSourceShredFailed) onSaved()
                 },
                 onFailure = {
                     Diagnostics.error("vault-folder.Add",
                         "addFile failed: ${it.javaClass.simpleName}: ${it.message}")
-                    status = "Add failed: ${it.message ?: it.javaClass.simpleName}"
                     opState = OpState.Idle
+                    showMessage(ctx.getString(R.string.add_failed, it.message ?: it.javaClass.simpleName))
                 },
             )
         }
@@ -1074,67 +1186,72 @@ private fun AddScreen(
         }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("add file", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-        Text(
-            "Pick a file via the system file picker. It's encrypted in-place under " +
-                "this vault's master key. Per-file cap: 20 MiB.",
-            color = Color(0xFF9E9E9E), fontSize = 12.sp,
-        )
-        Button(
-            onClick = {
-                if (working) return@Button
-                Diagnostics.log("vault-folder.Add", "Pick a file: tap")
-                VaultFolderManager.beginTransientFlight()
-                runCatching { pickInput.launch(arrayOf("*/*")) }
-                    .onFailure {
-                        Diagnostics.error("vault-folder.Add",
-                            "pickInput.launch threw: ${it.javaClass.simpleName}: ${it.message}")
-                        VaultFolderManager.endTransientFlight()
-                    }
-            },
-            enabled = !working,
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text(if (working) "Encrypting…" else "Pick a file")
-        }
-        if (working) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
-
-        Row(
+    SuiteScaffold(
+        title = stringResource(R.string.title_add),
+        onBack = onCancel,
+        showSuiteFooter = false,
+    ) { pad ->
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .background(Color(0xFF1C1C1C), RoundedCornerShape(6.dp))
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .fillMaxSize()
+                .padding(pad)
+                .verticalScroll(rememberScrollState())
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
         ) {
-            Column(modifier = Modifier.fillMaxWidth(0.85f)) {
-                Text("Delete source after import", color = Color(0xFFE0E0E0), fontSize = 13.sp)
+            Text(
+                stringResource(R.string.add_intro),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = {
+                    if (working) return@Button
+                    Diagnostics.log("vault-folder.Add", "Pick a file: tap")
+                    VaultFolderManager.beginTransientFlight()
+                    runCatching { pickInput.launch(arrayOf("*/*")) }
+                        .onFailure {
+                            Diagnostics.error("vault-folder.Add",
+                                "pickInput.launch threw: ${it.javaClass.simpleName}: ${it.message}")
+                            VaultFolderManager.endTransientFlight()
+                        }
+                },
+                enabled = !working,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
                 Text(
-                    if (shredSource)
-                        "On — you'll confirm before each shred. Only works on URIs " +
-                            "with WRITE permission (system file picker, not bare " +
-                            "Open-with deposits)."
-                    else
-                        "Off — the source file stays where it is.",
-                    color = Color(0xFF9E9E9E), fontSize = 11.sp,
+                    if (working) stringResource(R.string.add_working)
+                    else stringResource(R.string.add_pick)
                 )
             }
-            Switch(
-                checked = shredSource,
-                enabled = !working,
-                onCheckedChange = {
-                    shredSource = it
-                    Diagnostics.log("vault-folder.Add", "shred toggle: ${if (it) "ON" else "OFF"}")
-                },
-            )
-        }
+            if (working) LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
 
-        status?.let { Text(it, color = Color(0xFFFFB74D), fontSize = 12.sp) }
-        Spacer(Modifier.height(8.dp))
-        OutlinedButton(onClick = onCancel, enabled = !working, modifier = Modifier.fillMaxWidth()) { Text("Back") }
+            // §3 GUI a11y: the shared SwitchRow bakes in the merged Role.Switch
+            // TalkBack semantics (reads "<label>, switch, on") that a bare Switch
+            // in a Row lacks. The supporting line changes with the toggle state.
+            Surface(
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                shape = MaterialTheme.shapes.small,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                SwitchRow(
+                    label = stringResource(R.string.add_shred_label),
+                    checked = shredSource,
+                    enabled = !working,
+                    supporting = if (shredSource) stringResource(R.string.add_shred_on)
+                    else stringResource(R.string.add_shred_off),
+                    onCheckedChange = {
+                        shredSource = it
+                        Diagnostics.log("vault-folder.Add", "shred toggle: ${if (it) "ON" else "OFF"}")
+                    },
+                )
+            }
+
+            Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
+            OutlinedButton(onClick = onCancel, enabled = !working, modifier = Modifier.fillMaxWidth()) {
+                Text(stringResource(R.string.action_back))
+            }
+        }
     }
 
     // §3.2 deposit-confirm interstitial. Renders metadata ONLY (no content
@@ -1144,10 +1261,14 @@ private fun AddScreen(
         val meta = remember(uri) { queryDisplayMetadata(ctx, uri) }
         val displayName = remember(meta) { clampName(meta.first) }
         val sizeText = remember(uri) { humanSize(queryDisplaySize(ctx, uri)) }
-        val folderLabel = if (store.folderId == VaultFolder.DEFAULT_FOLDER_ID) "Default"
-            else store.folderId.take(8) + "…"
+        val folderLabel = if (store.folderId == VaultFolder.DEFAULT_FOLDER_ID)
+            stringResource(R.string.folder_default_name)
+        else store.folderId.take(8) + "…"
         AlertDialog(
-            onDismissRequest = { pendingDepositConfirm = null; status = ctx.getString(R.string.deposit_cancelled) },
+            onDismissRequest = {
+                pendingDepositConfirm = null
+                showMessage(ctx.getString(R.string.deposit_cancelled))
+            },
             title = { Text(stringResource(R.string.deposit_confirm_title)) },
             text = {
                 Text(
@@ -1169,7 +1290,7 @@ private fun AddScreen(
             dismissButton = {
                 TextButton(onClick = {
                     pendingDepositConfirm = null
-                    status = ctx.getString(R.string.deposit_cancelled)
+                    showMessage(ctx.getString(R.string.deposit_cancelled))
                 }) { Text(stringResource(R.string.action_cancel)) }
             },
         )
@@ -1178,26 +1299,23 @@ private fun AddScreen(
     pendingShredConfirm?.let { uri ->
         AlertDialog(
             onDismissRequest = { pendingShredConfirm = null },
-            title = { Text("Shred source after import?") },
+            title = { Text(stringResource(R.string.shred_title)) },
             text = {
-                Text(
-                    "After encrypting this file into the vault, attempt to " +
-                        "permanently delete the source file from where you " +
-                        "picked it. This cannot be undone if it succeeds. " +
-                        "If the source URI doesn't grant write access, the " +
-                        "delete will fail and the source will remain — your " +
-                        "encrypted copy is safe either way.",
-                )
+                Text(stringResource(R.string.shred_body))
             },
             confirmButton = {
                 TextButton(onClick = {
                     val u = pendingShredConfirm
                     pendingShredConfirm = null
                     if (u != null) runAdd(u)
-                }) { Text("Encrypt + shred", color = Color(0xFFEF5350)) }
+                }) {
+                    Text(stringResource(R.string.shred_confirm), color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
-                TextButton(onClick = { pendingShredConfirm = null }) { Text("Cancel") }
+                TextButton(onClick = { pendingShredConfirm = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
             },
         )
     }

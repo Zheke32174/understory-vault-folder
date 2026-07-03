@@ -12,13 +12,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -33,17 +33,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
+import androidx.compose.ui.res.stringResource
 import androidx.fragment.app.FragmentActivity
 import androidx.lifecycle.Lifecycle
 import com.understory.security.Crypto
 import com.understory.security.Diagnostics
 import com.understory.security.SecureOutlinedButton
 import com.understory.security.ui.Bg
+import com.understory.security.ui.components.SuiteScaffold
+import com.understory.security.ui.theme.UnderstoryTheme
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -66,6 +66,7 @@ import kotlinx.coroutines.withContext
 fun FoldersScreen(
     activity: FragmentActivity,
     currentFolderId: String?,
+    showMessage: (String) -> Unit,
     onOpenFolder: (VaultFolderStore) -> Unit,
     onBack: () -> Unit,
 ) {
@@ -74,7 +75,6 @@ fun FoldersScreen(
     var refreshKey by remember { mutableStateOf(0) }
     val folders = remember(refreshKey) { VaultFolders.list(ctx) }
     var error by remember { mutableStateOf<String?>(null) }
-    var notice by remember { mutableStateOf<String?>(null) }
     var working by remember { mutableStateOf(false) }
     var showCreateDialog by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<VaultFolders.FolderInfo?>(null) }
@@ -86,99 +86,106 @@ fun FoldersScreen(
         withContext(Bg.io) { runCatching { VaultFolders.pruneOrphans(ctx) } }
     }
 
-    Column(
-        modifier = Modifier.fillMaxSize().padding(20.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text("folders", color = Color(0xFFE0E0E0), fontSize = 22.sp)
-        Text(
-            "Each folder has its own master key, biometric-released. " +
-                "Switching folders prompts for biometric again. The " +
-                "Default folder is the one created at first setup.",
-            color = Color(0xFF9E9E9E), fontSize = 12.sp,
-        )
-        error?.let { Text(it, color = Color(0xFFEF5350), fontSize = 12.sp) }
-        // §6.4: folder-delete / rename success is a NEUTRAL line, not the red
-        // error slot.
-        notice?.let { Text(it, color = Color(0xFF81C784), fontSize = 12.sp) }
-
-        LazyColumn(
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            // §6.2 (A11.3 / D9): weight(1f) so a long folder list can't push
-            // Create/Back off-screen; those stay as fixed rows below.
-            modifier = Modifier.fillMaxWidth().weight(1f),
+    SuiteScaffold(
+        title = stringResource(R.string.title_folders),
+        onBack = onBack,
+        showSuiteFooter = false,
+    ) { pad ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(pad)
+                .padding(UnderstoryTheme.spacing.lg),
+            verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm),
         ) {
-            items(folders, key = { it.id }) { folder ->
-                FolderRow(
-                    folder = folder,
-                    isCurrent = folder.id == currentFolderId,
-                    working = working,
-                    onOpen = {
-                        if (working) return@FolderRow
-                        if (folder.id == currentFolderId) {
-                            // Already unlocked; just navigate to its list.
-                            // Caller passes through the existing store.
-                            onBack()
-                            return@FolderRow
-                        }
-                        Diagnostics.log("vault-folder.Folders", "open: ${folder.id}")
-                        working = true
-                        error = null
-                        notice = null
-                        runCatching {
-                            val iv = VaultFolder.ivForUnlock(ctx, folder.id)
-                            val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
-                            promptDeviceAuth(activity, "Unlock ${folder.name}",
-                                "Required to release this folder's master key.", cipher,
-                                onSuccess = { authed ->
-                                    runCatching {
-                                        val store = VaultFolder.unlock(ctx, authed, folder.id)
-                                        if (activity.lifecycle.currentState
-                                                .isAtLeast(Lifecycle.State.STARTED)
-                                        ) {
-                                            onOpenFolder(store)
-                                        } else {
-                                            store.lock()
-                                        }
-                                        working = false
-                                    }.onFailure {
-                                        error = "Decrypt failed: ${it.message}"
-                                        working = false
-                                    }
-                                },
-                                onError = { msg ->
-                                    error = "Auth failed: $msg"; working = false
-                                },
-                                onCancel = {
-                                    error = "Auth cancelled."; working = false
-                                },
-                            )
-                        }.onFailure {
-                            error = "Crypto init failed: ${it.message}"; working = false
-                        }
-                    },
-                    onDelete = if (folder.isDefault) null else {
-                        { pendingDelete = folder }
-                    },
-                    // §6.5 (A13 / D12): rename is only offered on non-default
-                    // folders (the default's display name is hardcoded).
-                    onRename = if (folder.isDefault) null else {
-                        { pendingRename = folder }
-                    },
-                )
+            Text(
+                stringResource(R.string.folders_intro),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            error?.let {
+                Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.error)
             }
-        }
 
-        Spacer(Modifier.height(8.dp))
-        Button(
-            onClick = { showCreateDialog = true },
-            modifier = Modifier.fillMaxWidth(),
-            enabled = !working,
-        ) { Text("Create folder") }
-        OutlinedButton(
-            onClick = onBack,
-            modifier = Modifier.fillMaxWidth(),
-        ) { Text("Back") }
+            LazyColumn(
+                verticalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.xs),
+                // §6.2 (A11.3 / D9): weight(1f) so a long folder list can't push
+                // Create/Back off-screen; those stay as fixed rows below.
+                modifier = Modifier.fillMaxWidth().weight(1f),
+            ) {
+                items(folders, key = { it.id }) { folder ->
+                    FolderRow(
+                        folder = folder,
+                        isCurrent = folder.id == currentFolderId,
+                        working = working,
+                        onOpen = {
+                            if (working) return@FolderRow
+                            if (folder.id == currentFolderId) {
+                                // Already unlocked; just navigate to its list.
+                                // Caller passes through the existing store.
+                                onBack()
+                                return@FolderRow
+                            }
+                            Diagnostics.log("vault-folder.Folders", "open: ${folder.id}")
+                            working = true
+                            error = null
+                            runCatching {
+                                val iv = VaultFolder.ivForUnlock(ctx, folder.id)
+                                val cipher = Crypto.deviceAuthCipherForDecrypt(iv)
+                                promptDeviceAuth(
+                                    activity,
+                                    ctx.getString(R.string.auth_unlock_folder_title, folder.name),
+                                    ctx.getString(R.string.auth_folder_subtitle), cipher,
+                                    onSuccess = { authed ->
+                                        runCatching {
+                                            val store = VaultFolder.unlock(ctx, authed, folder.id)
+                                            if (activity.lifecycle.currentState
+                                                    .isAtLeast(Lifecycle.State.STARTED)
+                                            ) {
+                                                onOpenFolder(store)
+                                            } else {
+                                                store.lock()
+                                            }
+                                            working = false
+                                        }.onFailure {
+                                            error = ctx.getString(R.string.err_decrypt_failed, it.message)
+                                            working = false
+                                        }
+                                    },
+                                    onError = { msg ->
+                                        error = ctx.getString(R.string.err_auth_failed, msg); working = false
+                                    },
+                                    onCancel = {
+                                        error = ctx.getString(R.string.err_auth_cancelled); working = false
+                                    },
+                                )
+                            }.onFailure {
+                                error = ctx.getString(R.string.err_crypto_init, it.message); working = false
+                            }
+                        },
+                        onDelete = if (folder.isDefault) null else {
+                            { pendingDelete = folder }
+                        },
+                        // §6.5 (A13 / D12): rename is only offered on non-default
+                        // folders (the default's display name is hardcoded).
+                        onRename = if (folder.isDefault) null else {
+                            { pendingRename = folder }
+                        },
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
+            Button(
+                onClick = { showCreateDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !working,
+            ) { Text(stringResource(R.string.folders_create)) }
+            OutlinedButton(
+                onClick = onBack,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.action_back)) }
+        }
     }
 
     if (showCreateDialog) {
@@ -200,7 +207,7 @@ fun FoldersScreen(
     pendingDelete?.let { folder ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
-            title = { Text("Delete folder?") },
+            title = { Text(stringResource(R.string.folder_delete_title)) },
             text = {
                 // §6.4 (A12 / D5): folder-delete is the most destructive action
                 // in the app — bring its guard to parity with file delete:
@@ -211,10 +218,7 @@ fun FoldersScreen(
                     dialogView.filterTouchesWhenObscured = true
                     onDispose { }
                 }
-                Text(
-                    "Deletes the folder \"${folder.name}\" and ALL files in it. " +
-                        "No recycle bin, no recovery.",
-                )
+                Text(stringResource(R.string.folder_delete_body, folder.name))
             },
             confirmButton = {
                 val dialogView = LocalView.current
@@ -227,13 +231,20 @@ fun FoldersScreen(
                         val ok = withContext(Bg.io) {
                             runCatching { VaultFolders.delete(ctx, target.id) }.getOrDefault(false)
                         }
-                        if (ok) notice = "Deleted ${target.name}." else error = "Delete failed."
+                        // §6.4: folder-delete success is a NEUTRAL snackbar line,
+                        // not the red error slot.
+                        if (ok) showMessage(ctx.getString(R.string.folder_delete_done, target.name))
+                        else error = ctx.getString(R.string.folder_delete_failed)
                         refreshKey++
                     }
-                }) { Text("Delete", color = Color(0xFFEF5350)) }
+                }) {
+                    Text(stringResource(R.string.action_delete), color = MaterialTheme.colorScheme.error)
+                }
             },
             dismissButton = {
-                TextButton(onClick = { pendingDelete = null }) { Text("Cancel") }
+                TextButton(onClick = { pendingDelete = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
             },
         )
     }
@@ -245,12 +256,12 @@ fun FoldersScreen(
         var newName by remember(folder.id) { mutableStateOf(folder.name) }
         AlertDialog(
             onDismissRequest = { pendingRename = null },
-            title = { Text("Rename folder") },
+            title = { Text(stringResource(R.string.folder_rename_title)) },
             text = {
                 OutlinedTextField(
                     value = newName,
                     onValueChange = { newName = it },
-                    label = { Text("Folder name") },
+                    label = { Text(stringResource(R.string.folder_name_label)) },
                     singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
@@ -266,15 +277,18 @@ fun FoldersScreen(
                             val ok = withContext(Bg.io) {
                                 runCatching { VaultFolders.rename(ctx, target.id, name) }.isSuccess
                             }
-                            if (ok) notice = "Renamed to ${name.trim()}." else error = "Rename failed."
+                            if (ok) showMessage(ctx.getString(R.string.folder_rename_done, name.trim()))
+                            else error = ctx.getString(R.string.folder_rename_failed)
                             refreshKey++
                         }
                     },
                     enabled = newName.isNotBlank(),
-                ) { Text("Rename") }
+                ) { Text(stringResource(R.string.action_rename)) }
             },
             dismissButton = {
-                TextButton(onClick = { pendingRename = null }) { Text("Cancel") }
+                TextButton(onClick = { pendingRename = null }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
             },
         )
     }
@@ -293,42 +307,60 @@ private fun FolderRow(
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                if (isCurrent) Color(0xFF1A2A1A) else Color(0xFF1C1C1C),
-                RoundedCornerShape(6.dp),
+                if (isCurrent) UnderstoryTheme.semantic.successContainer
+                else MaterialTheme.colorScheme.surfaceVariant,
+                MaterialTheme.shapes.small,
             )
-            .padding(12.dp),
+            .padding(UnderstoryTheme.spacing.md),
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     folder.name,
-                    color = Color(0xFFE0E0E0), fontSize = 14.sp,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
                     modifier = Modifier.weight(1f),
                 )
                 if (isCurrent) {
-                    Text("· unlocked", color = Color(0xFF66BB6A), fontSize = 11.sp)
+                    Text(
+                        stringResource(R.string.folder_unlocked_tag),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = UnderstoryTheme.semantic.success,
+                    )
                 }
                 if (onRename != null) {
                     IconButton(onClick = onRename, enabled = !working) {
-                        Icon(Icons.Filled.Edit, contentDescription = "Rename ${folder.name}")
+                        Icon(
+                            Icons.Filled.Edit,
+                            contentDescription = stringResource(R.string.cd_rename, folder.name),
+                        )
                     }
                 }
             }
             Text(
-                if (folder.isDefault) "Default folder · created at setup"
-                else "Created ${java.text.SimpleDateFormat(
-                    "yyyy-MM-dd",
-                    java.util.Locale.getDefault(),
-                ).format(java.util.Date(folder.createdAtMs))}",
-                color = Color(0xFF9E9E9E), fontSize = 11.sp,
+                if (folder.isDefault) stringResource(R.string.folder_default_desc)
+                else stringResource(
+                    R.string.folder_created_desc,
+                    java.text.SimpleDateFormat(
+                        "yyyy-MM-dd",
+                        java.util.Locale.getDefault(),
+                    ).format(java.util.Date(folder.createdAtMs)),
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
-            Spacer(Modifier.height(8.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
+            Row(horizontalArrangement = Arrangement.spacedBy(UnderstoryTheme.spacing.sm)) {
                 Button(
                     onClick = onOpen,
                     enabled = !working,
                     modifier = if (onDelete != null) Modifier.fillMaxWidth(0.6f) else Modifier.fillMaxWidth(),
-                ) { Text(if (isCurrent) "Open" else "Unlock") }
+                ) {
+                    Text(
+                        if (isCurrent) stringResource(R.string.action_open)
+                        else stringResource(R.string.action_unlock)
+                    )
+                }
                 if (onDelete != null) {
                     // §6.4: row Delete is tap-jack-hardened (SecureOutlinedButton),
                     // matching the file-delete action's guard.
@@ -336,7 +368,7 @@ private fun FolderRow(
                         onClick = onDelete,
                         enabled = !working,
                         modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Delete") }
+                    ) { Text(stringResource(R.string.action_delete)) }
                 }
             }
         }
@@ -356,28 +388,33 @@ private fun CreateFolderDialog(
 
     AlertDialog(
         onDismissRequest = { if (step == 0) onDismiss() },
-        title = { Text(if (step == 0) "Create folder" else "Authenticate") },
+        title = {
+            Text(
+                if (step == 0) stringResource(R.string.folders_create)
+                else stringResource(R.string.folder_create_auth_title)
+            )
+        },
         text = {
             when (step) {
                 0 -> Column {
                     Text(
-                        "Pick a name. Each folder is independently encrypted; " +
-                            "you'll authenticate again after picking a name to " +
-                            "seed the new folder's master key.",
-                        color = Color(0xFF9E9E9E), fontSize = 12.sp,
+                        stringResource(R.string.folder_create_intro),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    Spacer(Modifier.height(8.dp))
+                    Spacer(Modifier.height(UnderstoryTheme.spacing.sm))
                     OutlinedTextField(
                         value = name,
                         onValueChange = { name = it },
-                        label = { Text("Folder name") },
+                        label = { Text(stringResource(R.string.folder_name_label)) },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth(),
                     )
                 }
                 1 -> Text(
-                    "Authenticate to seed the new folder's master key.",
-                    color = Color(0xFF9E9E9E), fontSize = 12.sp,
+                    stringResource(R.string.folder_create_auth_body),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         },
@@ -389,10 +426,10 @@ private fun CreateFolderDialog(
                     step = 1
                 },
                 enabled = step == 0 && name.isNotBlank(),
-            ) { Text("Next") }
+            ) { Text(stringResource(R.string.action_next)) }
         },
         dismissButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.action_cancel)) }
         },
     )
 
@@ -401,8 +438,10 @@ private fun CreateFolderDialog(
             runCatching {
                 val info = VaultFolders.reserveNew(ctx, name)
                 val cipher = Crypto.deviceAuthCipherForEncrypt()
-                promptDeviceAuth(activity, "Create ${info.name}",
-                    "Required to seed this folder's master key.", cipher,
+                promptDeviceAuth(
+                    activity,
+                    ctx.getString(R.string.auth_create_folder_title, info.name),
+                    ctx.getString(R.string.auth_create_folder_subtitle), cipher,
                     onSuccess = { authed ->
                         runCatching {
                             val store = VaultFolder.create(ctx, authed, info.id)
@@ -418,20 +457,20 @@ private fun CreateFolderDialog(
                             // create itself failed mid-way (no header
                             // to anchor the entry).
                             VaultFolders.delete(ctx, info.id)
-                            onError("Create failed: ${it.message}")
+                            onError(ctx.getString(R.string.err_create_failed, it.message))
                         }
                     },
                     onError = { msg ->
                         VaultFolders.delete(ctx, info.id)
-                        onError("Auth failed: $msg")
+                        onError(ctx.getString(R.string.err_auth_failed, msg))
                     },
                     onCancel = {
                         VaultFolders.delete(ctx, info.id)
-                        onError("Auth cancelled.")
+                        onError(ctx.getString(R.string.err_auth_cancelled))
                     },
                 )
             }.onFailure {
-                onError("Crypto init failed: ${it.message}")
+                onError(ctx.getString(R.string.err_create_failed, it.message))
             }
         }
     }
