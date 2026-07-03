@@ -34,6 +34,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Surface
@@ -574,13 +575,15 @@ private fun SetupScreen(
     var error by remember { mutableStateOf<String?>(null) }
     val deviceIssue = remember { deviceUnsupportedReason(ctx) }
 
-    // §4.3 recovery escrow: the recovery key minted for this setup (shown to the
-    // user in step 1), and whether the user chose to enroll it. Held in plain
-    // remember — process-bound, wiped on leave.
-    val recoveryKey = remember { VaultRecovery.newRecoveryKey() }
+    // §4.3 recovery escrow. THREAT-MODEL INVARIANT (screen-emanation defense):
+    // the value that can decrypt a recovery backup is NEVER rendered on screen —
+    // no key reveal, no QR. The user SUPPLIES a recovery passphrase (masked),
+    // which derives the escrow key and encrypts the recovery copy, and is what
+    // they type on restore. Held in plain remember — process-bound.
+    var recoveryPass by remember { mutableStateOf("") }
+    var recoveryConfirm by remember { mutableStateOf("") }
     var enrollRecovery by remember { mutableStateOf(true) }
-    var savedConfirmed by remember { mutableStateOf(false) }
-    DisposableEffect(Unit) { onDispose { recoveryKey.wipe() } }
+    val recoveryValid = recoveryPass.length >= 8 && recoveryPass == recoveryConfirm
 
     SuiteScaffold(
         title = stringResource(R.string.title_setup),
@@ -646,14 +649,19 @@ private fun SetupScreen(
                     }
                 }
                 1 -> {
-                    // §4.3: recovery-key enrollment choice BEFORE binding.
+                    // §4.3: recovery-passphrase enrollment choice BEFORE binding.
+                    // The passphrase is chosen by the user and never displayed
+                    // (threat model: no secret on screen).
                     Text(
-                        RecoveryCopy.RECOVERY_KEY_TITLE,
+                        "Recovery passphrase",
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurface,
                     )
                     Text(
-                        RecoveryCopy.RECOVERY_KEY_BODY,
+                        "Set a passphrase that can restore this vault on a new " +
+                            "device or after a fingerprint change. It is never " +
+                            "shown on screen or stored — if you lose it, a recovery " +
+                            "backup can't be opened. Keep it in your password manager.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -665,29 +673,33 @@ private fun SetupScreen(
                         onCheckedChange = { enrollRecovery = it },
                     )
                     if (enrollRecovery) {
-                        Surface(
-                            color = MaterialTheme.colorScheme.surfaceVariant,
-                            shape = MaterialTheme.shapes.small,
+                        OutlinedTextField(
+                            value = recoveryPass,
+                            onValueChange = { recoveryPass = it },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            label = { Text("Recovery passphrase") },
                             modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Text(
-                                com.understory.security.RecoveryKeyCodec.grouped(recoveryKey.chars),
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurface,
-                                modifier = Modifier.padding(UnderstoryTheme.spacing.md),
-                            )
-                        }
-                        Text(
-                            stringResource(R.string.setup_recovery_key_hint),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Checkbox(checked = savedConfirmed, onCheckedChange = { savedConfirmed = it })
+                        OutlinedTextField(
+                            value = recoveryConfirm,
+                            onValueChange = { recoveryConfirm = it },
+                            singleLine = true,
+                            visualTransformation = PasswordVisualTransformation(),
+                            label = { Text("Confirm passphrase") },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        if (recoveryPass.isNotEmpty() && recoveryPass.length < 8) {
                             Text(
-                                stringResource(R.string.setup_recovery_saved_confirm),
+                                "Use at least 8 characters.",
                                 style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurface,
+                                color = UnderstoryTheme.semantic.warning,
+                            )
+                        } else if (recoveryConfirm.isNotEmpty() && recoveryPass != recoveryConfirm) {
+                            Text(
+                                "The two entries don't match.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = UnderstoryTheme.semantic.warning,
                             )
                         }
                     }
@@ -696,7 +708,7 @@ private fun SetupScreen(
                     }
                     Button(
                         onClick = { step = 2 },
-                        enabled = !enrollRecovery || savedConfirmed,
+                        enabled = !enrollRecovery || recoveryValid,
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Text(
@@ -729,15 +741,24 @@ private fun SetupScreen(
                                     scope.launch {
                                         val outcome = runCatching {
                                             withContext(Bg.io) {
-                                                val keyChars = if (enrollRecovery) recoveryKey.chars else null
-                                                val v = VaultFolder.create(ctx, authed, recoveryKeyChars = keyChars)
-                                                if (enrollRecovery) {
+                                                // Derive the escrow key from the
+                                                // user's passphrase (never a shown
+                                                // random key). recoveryKeyFrom
+                                                // normalizes exactly as the restore
+                                                // path does, so enroll and restore
+                                                // stay consistent.
+                                                val rk = if (enrollRecovery)
+                                                    VaultRecovery.recoveryKeyFrom(recoveryPass.toCharArray())
+                                                else null
+                                                val v = VaultFolder.create(ctx, authed, recoveryKeyChars = rk?.chars)
+                                                if (rk != null) {
                                                     // Persist the recovery verifier so a later
-                                                    // recovery / import can check the key.
+                                                    // recovery / import can check the passphrase.
                                                     RecoveryStateStore.save(
                                                         ctx,
-                                                        VaultRecovery.enroll(recoveryKey, itemCount = 0),
+                                                        VaultRecovery.enroll(rk, itemCount = 0),
                                                     )
+                                                    rk.wipe()
                                                 }
                                                 v
                                             }
