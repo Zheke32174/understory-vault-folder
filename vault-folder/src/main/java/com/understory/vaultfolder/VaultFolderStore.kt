@@ -3,6 +3,8 @@ package com.understory.vaultfolder
 import android.annotation.SuppressLint
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
+import java.io.FileNotFoundException
 import com.understory.security.Crypto
 import org.json.JSONArray
 import org.json.JSONObject
@@ -104,14 +106,17 @@ class VaultFolderStore internal constructor(
     /**
      * Add a new file with explicit ingest options.
      *
-     * When [opts] requests source deletion, after a successful encrypt
-     * we attempt `ContentResolver.delete(uri, null, null)`. That only
-     * succeeds when the URI was granted with FLAG_GRANT_WRITE_URI_
-     * PERMISSION (typically OpenDocument or DocumentTree pickers, NOT
-     * bare ACTION_VIEW). On failure the import IS NOT rolled back —
-     * the encrypted copy in the vault is the user's primary copy now;
-     * the shred-failed result lets the UI surface the source-deletion
-     * failure so the user can manually delete the original.
+     * When [opts] requests source deletion, after a successful encrypt we delete
+     * the source through the API appropriate to the URI ([DocumentsContract.
+     * deleteDocument] for SAF document URIs, [ContentResolver.delete] otherwise)
+     * and then VERIFY by read-back: we only report [AddResult.AddedSourceShredded]
+     * once the original is confirmed no longer accessible. A provider returning
+     * "1 row deleted" (or DocumentsContract reporting success) can still leave a
+     * live MediaStore row or a trashed copy under scoped storage — so an
+     * unverified success is reported honestly as shred-*failed* ("still
+     * accessible"), never over-claimed as shredded. The import is never rolled
+     * back — the encrypted vault copy is the user's primary copy now; a
+     * shred-failed result tells the UI to prompt manual deletion of the original.
      */
     fun addFile(
         inputUri: Uri,
@@ -139,24 +144,64 @@ class VaultFolderStore internal constructor(
 
         if (!opts.deleteSourceAfterImport) return AddResult.Added(entry)
 
-        val shred = runCatching {
-            ctx.contentResolver.delete(inputUri, null, null)
-        }
-        return when {
-            shred.isSuccess && (shred.getOrNull() ?: 0) > 0 -> AddResult.AddedSourceShredded(entry)
-            shred.isSuccess -> AddResult.AddedSourceShredFailed(
+        val deleted = runCatching { deleteSource(inputUri) }
+        if (deleted.isFailure) {
+            return AddResult.AddedSourceShredFailed(
                 entry,
-                "ContentResolver.delete returned 0 rows — the source provider " +
-                    "didn't honor the delete (likely a read-only URI grant from " +
-                    "ACTION_VIEW; OpenDocument grants WRITE which most providers " +
-                    "treat as deletable).",
+                "Shred failed: ${deleted.exceptionOrNull()?.message ?: "unknown"}",
             )
-            else -> AddResult.AddedSourceShredFailed(
+        }
+        if (deleted.getOrDefault(false) != true) {
+            return AddResult.AddedSourceShredFailed(
                 entry,
-                "Shred failed: ${shred.exceptionOrNull()?.message ?: "unknown"}",
+                "The source provider didn't honor the delete (0 rows / not " +
+                    "deletable — likely a read-only ACTION_VIEW grant). Delete the " +
+                    "original manually.",
+            )
+        }
+        // The delete REPORTED success — but on scoped storage that can leave a
+        // live MediaStore row or a trashed copy. Confirm by read-back before
+        // claiming the source was shredded; never over-claim.
+        return if (sourceConfirmedGone(inputUri)) {
+            AddResult.AddedSourceShredded(entry)
+        } else {
+            AddResult.AddedSourceShredFailed(
+                entry,
+                "The delete reported success but the original is still accessible " +
+                    "(scoped storage can keep the media entry). Remove it manually " +
+                    "from Files/Gallery.",
             )
         }
     }
+
+    /**
+     * Delete the source through the API appropriate to its URI. SAF document
+     * URIs must go through [DocumentsContract.deleteDocument] (a plain
+     * [ContentResolver.delete] often throws UnsupportedOperationException on
+     * them); everything else uses the resolver. Returns true when the provider
+     * reports a deletion.
+     */
+    private fun deleteSource(uri: Uri): Boolean =
+        if (DocumentsContract.isDocumentUri(ctx, uri)) {
+            DocumentsContract.deleteDocument(ctx.contentResolver, uri)
+        } else {
+            ctx.contentResolver.delete(uri, null, null) > 0
+        }
+
+    /**
+     * True only when the source is CONFIRMED no longer accessible (opening it
+     * throws [FileNotFoundException]). If it still opens, or the state can't be
+     * determined, we conservatively return false so the caller does not claim a
+     * shred it can't prove.
+     */
+    private fun sourceConfirmedGone(uri: Uri): Boolean =
+        try {
+            ctx.contentResolver.openInputStream(uri)?.use { false } ?: false
+        } catch (_: FileNotFoundException) {
+            true
+        } catch (_: Throwable) {
+            false
+        }
 
     /**
      * Add a file from already-decrypted in-memory [plaintext] (recovery
