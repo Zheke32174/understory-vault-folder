@@ -1,0 +1,38 @@
+apiVersion: modos.pleiades/v1alpha1
+kind: Component
+metadata:
+  name: understory-encrypted-vault
+  repository: Zheke32174/understory-vault-folder
+  visibility: public
+  lifecycle: experimental
+  defaultBranch: main
+spec:
+  roles:
+    - encrypted-mobile-vault
+    - local-secret-artifact-store
+    - user-controlled-release-boundary
+  authority: local-enforcement
+  inputs:
+    - user-selected-artifacts
+    - local-vault-key-material
+    - release-policy
+  outputs:
+    - encrypted-vault-objects
+    - integrity-receipts
+    - explicit-release-events
+  capabilitiesProvided:
+    - artifact.secret.store.local
+    - artifact.secret.release.local
+    - vault.integrity.verify
+  capabilitiesRequired:
+    - secret.encryption.local
+    - identity.user.local
+    - filesystem.mobile.scoped
+    - audit.append.redacted
+  dataClasses:
+    - public
+    - private
+    - secret
+  failurePolicy: fail-closed
+  promotionPolicy: signed-pr
+  notes: Vault contents and keys remain outside model context, ordinary telemetry, and domain publication unless the steward explicitly releases a scoped artifact.
